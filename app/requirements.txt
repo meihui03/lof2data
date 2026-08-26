@@ -1,0 +1,7 @@
+streamlit
+pandas
+pillow
+PyMuPDF
+python-dotenv
+requests
+python-dateutil

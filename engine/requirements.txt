@@ -1,0 +1,11 @@
+numpy
+opencv-contrib-python==4.10.0.84
+PyMuPDF
+pillow
+paddleocr==3.7.0
+paddlepaddle==3.3.1
+paddlex[ocr]==3.7.2
+pandas
+pytesseract
+rapidfuzz
+requests
