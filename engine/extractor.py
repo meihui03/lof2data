@@ -6,6 +6,7 @@ on top.
 import argparse
 import base64
 import json
+import os
 import re
 import sys
 import time
@@ -20,7 +21,7 @@ import io
 
 from paddleocr import PaddleOCR
 
-OLLAMA_URL = "http://localhost:11434/api/chat"
+OLLAMA_URL = os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/") + "/api/chat"
 LLM_MODEL = "minimax-m3:cloud"
 
 

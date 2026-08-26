@@ -1,0 +1,38 @@
+# Secrets -------------------------------------------------------------
+# STAGING_API_PASSWORD lives here. Never commit it; see .env.example.
+.env
+.env.*
+!.env.example
+
+# Real documents and their extractions --------------------------------
+# Letters of Offer contain real names, NRIC/passport numbers and home
+# addresses. Neither the source PDFs nor anything derived from them
+# (extraction JSON, OCR dumps, ground-truth answer keys) belongs in git,
+# public or private.
+input/
+output/
+*.pdf
+ground_truth.json
+
+# Virtualenvs ---------------------------------------------------------
+.venv/
+venv/
+env/
+
+# Python --------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Streamlit -----------------------------------------------------------
+.streamlit/secrets.toml
+
+# OS ------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+
+# Editors -------------------------------------------------------------
+.idea/
+.vscode/
+*.swp

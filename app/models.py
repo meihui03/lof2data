@@ -23,9 +23,11 @@ latency (a cold local model has to load into memory first, which is far
 slower than a cloud round-trip).
 """
 
+import os
+
 import requests
 
-OLLAMA_HOST = "http://localhost:11434"
+OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 
 AVAILABLE = "available"
 RATE_LIMITED = "rate_limited"
