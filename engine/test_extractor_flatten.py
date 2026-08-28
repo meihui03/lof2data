@@ -22,6 +22,30 @@ def leaf(value):
     return {"value": value, "confidence": 1.0, "source_index": 3}
 
 
+class TestChoiceCandidates(unittest.TestCase):
+    """The option lists the UI needs to locate a choice field's printed line
+    on the page. Published from the schema rather than restated in the UI, so
+    the prompt, the geometric detector and the box lookup can never disagree
+    about what the legal options are."""
+
+    def test_publishes_both_choice_fields(self):
+        self.assertEqual(set(E.choice_candidates()), set(E.CHOICE_FIELD_TARGETS))
+
+    def test_furnished_status_options(self):
+        self.assertEqual(E.choice_candidates()["Furnished Status"],
+                         ["NOT", "PARTLY", "FULLY"])
+
+    def test_property_type_options_come_from_the_schema(self):
+        schema = {f["field"]: f for spec in E.get_group_schema().values()
+                  for f in spec["fields"]}
+        self.assertEqual(E.choice_candidates()["Description/Property Type"],
+                         schema["Description/Property Type"]["candidates"])
+
+    def test_every_published_field_has_a_non_empty_list(self):
+        for field, candidates in E.choice_candidates().items():
+            self.assertTrue(candidates, f"{field} published an empty option list")
+
+
 class TestJoinOccurrences(unittest.TestCase):
     def test_joins_two_co_landlords(self):
         occurrences = [{"Name": leaf("ALICE TAN")}, {"Name": leaf("BRIAN LIM")}]

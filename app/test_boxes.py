@@ -100,5 +100,86 @@ class TestCitedBoxes(unittest.TestCase):
                          ["LETTER OF OFFER"])
 
 
+class TestFindBoxByText(unittest.TestCase):
+    """The fallback used when a model cites no source_index - which is ALWAYS
+    the case for the two choice fields, whose value comes from a circled or
+    struck mark rather than printed text. An unanchored substring search puts
+    those boxes on the wrong line entirely."""
+
+    # A realistic page: the Notice-to-Quit clause is printed above the
+    # furnished-status choice line, and contains "NOT" inside "NOTICE".
+    CHOICE_PAGE = [
+        {"index": 0, "page": 0, "text": "14. NOTICE TO QUIT: TWO (2) MONTHS"},
+        {"index": 1, "page": 0, "text": "Furnished Status: NOT / PARTLY / FULLY FURNISHED"},
+    ]
+
+    def test_short_value_does_not_match_inside_a_longer_word(self):
+        # "NOT" must not land on "NOTICE TO QUIT".
+        box = boxes.find_box_by_text(self.CHOICE_PAGE, "NOT")
+        self.assertEqual(box["index"], 1)
+
+    def test_whole_word_match_still_found(self):
+        box = boxes.find_box_by_text(self.CHOICE_PAGE, "FULLY")
+        self.assertEqual(box["index"], 1)
+
+    def test_prefers_whole_word_over_an_earlier_substring(self):
+        ocr = [
+            {"index": 0, "page": 0, "text": "SUBLETTING IS NOT PERMITTED"},
+            {"index": 1, "page": 0, "text": "PARTLY"},
+        ]
+        self.assertEqual(boxes.find_box_by_text(ocr, "PARTLY")["index"], 1)
+
+    def test_value_absent_returns_none(self):
+        self.assertIsNone(boxes.find_box_by_text(self.CHOICE_PAGE, "BUNGALOW"))
+
+    def test_single_character_is_too_short_to_search(self):
+        self.assertIsNone(boxes.find_box_by_text(self.CHOICE_PAGE, "N"))
+
+    def test_prefix_fallback_absorbs_a_dropped_trailing_character(self):
+        # PaddleOCR commonly clips the last letter of a word a mark is drawn
+        # through - "FULLY" recognized as "FULL". The prefix path must survive.
+        ocr = [{"index": 0, "page": 0, "text": "NOT / PARTLY / FULL FURNISHED"}]
+        self.assertEqual(boxes.find_box_by_text(ocr, "FULLY")["index"], 0)
+
+    def test_empty_value_returns_none(self):
+        self.assertIsNone(boxes.find_box_by_text(self.CHOICE_PAGE, ""))
+
+
+class TestFindChoiceLine(unittest.TestCase):
+    """Locating a choice field's printed option line the way mark_detector
+    does it - the line where the most DISTINCT candidates co-occur. Prose that
+    happens to contain one option word has exactly one; the real choice line
+    has nearly all of them."""
+
+    def test_picks_the_line_where_most_candidates_co_occur(self):
+        ocr = [
+            {"index": 0, "page": 0, "text": "Land Office reference: LAND TITLE"},
+            {"index": 1, "page": 0, "text": "House / Semi-D / Bungalow / Condo / Land"},
+        ]
+        candidates = ["House", "Semi-D", "Bungalow", "Condo", "Land"]
+        self.assertEqual(boxes.find_choice_line(ocr, candidates)["index"], 1)
+
+    def test_single_candidate_hit_is_not_a_choice_line(self):
+        # One match is prose, not an option list - abstain so the caller can
+        # fall back rather than box a random sentence.
+        ocr = [{"index": 0, "page": 0, "text": "Land Office reference only"}]
+        self.assertIsNone(boxes.find_choice_line(ocr, ["House", "Condo", "Land"]))
+
+    def test_no_candidates_returns_none(self):
+        ocr = [{"index": 0, "page": 0, "text": "NOT / PARTLY / FULLY"}]
+        self.assertIsNone(boxes.find_choice_line(ocr, []))
+
+    def test_candidate_inside_a_longer_word_does_not_count(self):
+        # "NOTICE" must not count as the candidate "NOT".
+        ocr = [
+            {"index": 0, "page": 0, "text": "NOTICE TO QUIT AND PARTLY VACATE"},
+            {"index": 1, "page": 0, "text": "NOT / PARTLY / FULLY"},
+        ]
+        self.assertEqual(boxes.find_choice_line(ocr, ["NOT", "PARTLY", "FULLY"])["index"], 1)
+
+    def test_empty_ocr_returns_none(self):
+        self.assertIsNone(boxes.find_choice_line([], ["NOT", "PARTLY"]))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

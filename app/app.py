@@ -122,31 +122,6 @@ def get_model_availability(session_rate_limited):
     return models.available_models(session_rate_limited=session_rate_limited)
 
 
-def find_box_by_text(ocr_boxes, value):
-    """Finds the first OCR box whose recognized text contains `value` as a
-    case-insensitive substring - a template-agnostic fallback for locating
-    a field's box when the LLM has no source_index for it (e.g. a choice
-    field read off a circled/struck visual mark: the OCR text still
-    contains the printed choice line, just not which option was marked).
-    Falls back to a 4-char prefix match if the full value isn't found
-    verbatim - a mark drawn over/through a short choice word (e.g. a
-    circle clipping the "Y" in "FULLY") commonly costs OCR its last
-    character or two. Returns None if `value` is too short to search
-    reliably or no OCR box contains it either way."""
-    needle = str(value).strip().upper()
-    if len(needle) < 2:
-        return None
-    for b in ocr_boxes:
-        if needle in b.get("text", "").upper():
-            return b
-    if len(needle) > 4:
-        prefix = needle[:4]
-        for b in ocr_boxes:
-            if prefix in b.get("text", "").upper():
-                return b
-    return None
-
-
 def collect_field_boxes(result):
     """Walks result["_raw"]["fields"] and result["_raw"]["groups"] to find
     every field/sub-field's box: prefer the LLM's own source_index citation
@@ -158,6 +133,9 @@ def collect_field_boxes(result):
     ocr_boxes = result.get("_ocr_boxes", [])
     ocr_by_index = {b["index"]: b for b in ocr_boxes}
     raw = result.get("_raw", {})
+    # {sub-field: option list} for the choice fields, published by the engine
+    # from its own schema (extractor.choice_candidates).
+    candidates_by_field = raw.get("_choice_candidates", {})
     found = []
 
     def add_box(label, b, color):
@@ -166,7 +144,7 @@ def collect_field_boxes(result):
             "box": (b["x0"], b["y0"], b["x1"], b["y1"]), "color": color,
         })
 
-    def add_from_leaf(label, leaf):
+    def add_from_leaf(label, leaf, candidates=None):
         if not isinstance(leaf, dict):
             return
         # A model may cite more than one OCR line for a value that spans
@@ -180,7 +158,13 @@ def collect_field_boxes(result):
         value = leaf.get("value")
         if not value:
             return
-        b = find_box_by_text(ocr_boxes, value)
+        # A choice field's value is a short, common word ("NOT", "Land") that
+        # occurs inside ordinary form prose, so locate its printed option LINE
+        # instead - the line carrying most of the option list. Falls through
+        # when this form states the field as free text with no printed list.
+        b = boxes.find_choice_line(ocr_boxes, candidates) if candidates else None
+        if b is None:
+            b = boxes.find_box_by_text(ocr_boxes, value)
         if b is not None:
             add_box(label, b, BOX_COLOR_MATCHED)
 
@@ -193,7 +177,8 @@ def collect_field_boxes(result):
             if not isinstance(occurrence, dict):
                 continue
             for sub_field, leaf in occurrence.items():
-                add_from_leaf(f"{group_name}.{sub_field}", leaf)
+                add_from_leaf(f"{group_name}.{sub_field}", leaf,
+                              candidates_by_field.get(sub_field))
 
     return found
 
@@ -343,7 +328,10 @@ if extract_clicked and not st.session_state["is_processing"]:
     elif not selected_model:
         st.error("No model is available to run the extraction.")
     elif not os.environ.get("STAGING_API_PASSWORD"):
-        st.error("STAGING_API_PASSWORD not found - check vision-form-reader/.env")
+        st.error(
+            "STAGING_API_PASSWORD not found - copy .env.example to .env at the "
+            "repo root and fill it in."
+        )
     else:
         st.session_state["is_processing"] = True
         st.rerun()
@@ -431,6 +419,7 @@ if "comparison_df" in st.session_state:
         m1.metric("Time taken", f"{st.session_state['elapsed']:.1f}s")
         m2.metric("Accuracy", f"{st.session_state['accuracy']:.0%}")
         m3.metric("Fields matched", f"{st.session_state['correct']}/{st.session_state['verifiable']}")
+        m4.metric("Model", st.session_state["model_used"])
 
         tab_compare, tab_source = st.tabs(["Field Comparison", "Source Document"])
 

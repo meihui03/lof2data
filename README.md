@@ -46,7 +46,7 @@ engine/    extraction — OCR, prompting, choice-field detection
 |---|---|
 | `app/app.py` | the UI; shells out to the engine, renders results |
 | `app/models.py` | which models are offerable, and cloud rate-limit gating |
-| `app/boxes.py` | turns an LLM `source_index` citation into boxes to draw |
+| `app/boxes.py` | turns an LLM `source_index` citation into boxes to draw, and locates a box by text when there's no citation |
 | `app/groundtruth.py` | fetches the CRM record and matches values against it |
 | `engine/extractor.py` | OCR, prompt building, extraction, flattening |
 | `engine/mark_detector.py` | template-free reader for circled/struck choices |
@@ -96,8 +96,14 @@ Two are offered, both benchmarked on real LOF forms:
 
 | Model | | Accuracy | Time/doc |
 |---|---|---|---|
-| `minimax-m3:cloud` | cloud | 92.0% | ~87s |
-| `qwen3-vl:8b-instruct` | local | 85.7% | ~254s |
+| `minimax-m3:cloud` | cloud | 93.8% | ~197s |
+| `qwen3-vl:8b-instruct` | local | 85.7%\* | ~254s |
+
+Measured end-to-end through `run()` — the path the app actually takes, geometric
+override included — on 4 documents × 28 fields, with no substring credit.
+\*the local model has only been measured on the benchmark arm that stops before
+the override, so its real figure is likely a little higher. See
+[DESIGN.md](DESIGN.md) for what the two measurements mean.
 
 A cloud model that has exhausted its quota is removed from the dropdown with
 the reason shown, rather than left selectable to fail mid-run — detected by a
@@ -115,6 +121,7 @@ Stdlib `unittest`, no extra dependency:
 ```bash
 app/.venv/bin/python3 app/test_boxes.py
 app/.venv/bin/python3 app/test_models.py
+app/.venv/bin/python3 app/test_groundtruth.py
 engine/.venv/bin/python3 engine/test_extractor_flatten.py
 ```
 

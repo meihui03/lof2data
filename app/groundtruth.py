@@ -4,8 +4,9 @@ accuracy can be checked against the CRM record rather than eyeballed.
 
 The API's schema only covers a subset of what's printed on the LOF form (no
 signature dates, no furnished status, no rental/deposit breakdown), so
-FORM_FIELD_MAPS below maps only the fields that genuinely have an API
-counterpart. Fields with no mapping simply can't be validated this way.
+CANONICAL_API_MAP below maps only the fields that genuinely have an API
+counterpart. Fields with no mapping resolve to None and are shown as
+"not verifiable" rather than as a false mismatch.
 
 Merged here from two modules in the original multi-project layout
 (api_ground_truth.py + compare.py's value matchers) so this project has a
@@ -44,6 +45,21 @@ def _landlord_parties(sale):
     return sale.get("amla_purpose", {}).get("vendors_or_landlords") or []
 
 
+def _join_parties(parties, key):
+    """One sub-field across every party, joined the way the extractor joins
+    its own side (extractor.OCCURRENCE_SEPARATOR), so the two halves of the
+    comparison are formatted identically.
+
+    Optional keys are genuinely absent on some records - a landlord with no
+    NRIC on file - so this reads them with .get() like the tenant lambdas
+    beside it. Indexing raised KeyError instead, which surfaced to the user as
+    a bare "Extraction failed: 'nric'" AFTER a full extraction had been paid
+    for. Blanks are skipped rather than joined, since " / " with nothing
+    either side reads as a value when it isn't one."""
+    values = [str(p.get(key)).strip() for p in parties if p.get(key)]
+    return " / ".join(values) or None
+
+
 def _earliest_deposit(sale):
     deposits = sale.get("deposits") or []
     if not deposits:
@@ -51,83 +67,16 @@ def _earliest_deposit(sale):
     return min(deposits, key=lambda d: d.get("deposit_date") or "9999-99-99")
 
 
-def _property_address_parts(sale):
-    p = sale.get("property", {})
-    parts = [p.get("unit"), p.get("road"), p.get("building"), p.get("zip_code")]
-    return ", ".join(part for part in parts if part)
-
-
-# name -> function(sale_dict) -> raw value (str/None), per form template.
-FORM_FIELD_MAPS = {
-    "form1": {
-        "Date": lambda s: s.get("date_of_lof"),
-        "Reference No.": lambda s: s.get("lof_no"),
-        # Form1 has no explicit "Attn: Negotiator(s):" field like Form2/3 -
-        # the negotiator's name instead shows up as the "Witnessed by / Name"
-        # signatory on this template's signature blocks.
-        "Negotiator": lambda s: s.get("listing_negotiator", {}).get("name"),
-        "Tenant(s)": lambda s: _tenant_client(s).get("name"),
-        "Property Address": lambda s: s.get("property", {}).get("address"),
-        "Description of Property (Selected)": lambda s: (s.get("property", {}).get("type") or "").title() or None,
-        "Total": lambda s: s.get("total_deposit"),
-        "Earnest Deposit Amount": lambda s: _earliest_deposit(s).get("amount"),
-        "Landlord Name": lambda s: " / ".join(p["name"] for p in _landlord_parties(s)) or None,
-        "Landlord NRIC/Passport No.": lambda s: " / ".join(p["nric"] for p in _landlord_parties(s)) or None,
-    },
-    "form2": {
-        "Attn: Negotiator(s)": lambda s: s.get("listing_negotiator", {}).get("name"),
-        "Date": lambda s: s.get("date_of_lof"),
-        "Description of Property (Selected)": lambda s: (s.get("property", {}).get("type") or "").title() or None,
-        "Property known as": _property_address_parts,
-        "Total": lambda s: s.get("total_deposit"),
-        "Earnest Deposit Amount": lambda s: _earliest_deposit(s).get("amount"),
-        "Tenant Name": lambda s: _tenant_client(s).get("name"),
-        "Landlord Name": lambda s: " / ".join(p["name"] for p in _landlord_parties(s)) or None,
-        "Landlord NRIC No.": lambda s: " / ".join(p["nric"] for p in _landlord_parties(s)) or None,
-        "Vacant Possession Date": lambda s: s.get("date_of_co"),
-        "Tenancy Agreement Execution Date": lambda s: s.get("date_of_co"),
-    },
-    # Form3 is a different LOF template but the same underlying CRM sale
-    # record, so it draws from the same API fields as form2.
-    "form3": {
-        "Attn: Negotiator(s)": lambda s: s.get("listing_negotiator", {}).get("name"),
-        "Date": lambda s: s.get("date_of_lof"),
-        "Description of Property (Selected)": lambda s: (s.get("property", {}).get("type") or "").title() or None,
-        "Property known as": _property_address_parts,
-        "Total": lambda s: s.get("total_deposit"),
-        "Earnest Deposit Amount": lambda s: _earliest_deposit(s).get("amount"),
-        "Tenant Name": lambda s: _tenant_client(s).get("name"),
-        "Landlord Name": lambda s: " / ".join(p["name"] for p in _landlord_parties(s)) or None,
-        "Landlord NRIC No.": lambda s: " / ".join(p["nric"] for p in _landlord_parties(s)) or None,
-        "Vacant Possession Date": lambda s: s.get("date_of_co"),
-        "Tenancy Agreement Execution Date": lambda s: s.get("date_of_co"),
-    },
-}
-
-# How to compare each field - most fields are free text (handled by
-# compare.py's values_match); dates and money amounts need format-aware
-# comparison since the API and the form spell them out very differently
-# ("2026-03-21" vs "1ST APRIL 2026"; "11320.00" vs "RM 11,320").
-FIELD_KINDS = {
-    "Date": "date",
-    "Vacant Possession Date": "date",
-    "Tenancy Agreement Execution Date": "date",
-    "Total": "amount",
-    "Earnest Deposit Amount": "amount",
-    "Landlord NRIC/Passport No.": "id",
-    "Landlord NRIC No.": "id",
-    "Tenant(s)": "id",
-    # ids_match strips all non-alphanumeric chars before comparing, which
-    # also happens to fix reference numbers matching despite spacing
-    # differences (e.g. "206537 (31/03)" vs "206537(31/03)").
-    "Reference No.": "id",
-}
-
-# Fixed comparison checklist, independent of form template - it's the same
-# CRM sale record regardless of which LOF template was used, so one API-side
-# lambda per field covers all of them (unlike FORM_FIELD_MAPS above, which
-# exists because each template's EXTRACTED field names differ, not because
-# the API itself differs per template).
+# One comparison checklist for every LOF template. The API side was never
+# template-specific - it's the same CRM sale record whichever template the
+# document happens to use - and the extractor is template-free too, so
+# nothing downstream needs to know which layout it read.
+#
+# (An earlier per-template FORM_FIELD_MAPS lived here, from when
+# bbox-ocr-extractor classified each PDF as form1/2/3 and gave its output
+# different field names per template. Its three entries resolved to the same
+# API lambdas and differed only in key naming, so it was removed along with
+# build_api_ground_truth() when this became a standalone project.)
 #
 # Furnish Status / Security / Utilities / Others / Advance Rental have no
 # API equivalent at all - the API only carries an aggregate total_deposit,
@@ -168,8 +117,8 @@ CANONICAL_API_MAP = {
     "Total": lambda s: s.get("total_deposit"),
     "Tenant Name": lambda s: _tenant_client(s).get("name"),
     "Tenant IC": lambda s: _tenant_client(s).get("nric"),
-    "Landlord Name": lambda s: " / ".join(p["name"] for p in _landlord_parties(s)) or None,
-    "Landlord IC": lambda s: " / ".join(p["nric"] for p in _landlord_parties(s)) or None,
+    "Landlord Name": lambda s: _join_parties(_landlord_parties(s), "name"),
+    "Landlord IC": lambda s: _join_parties(_landlord_parties(s), "nric"),
 }
 
 CANONICAL_FIELD_KINDS = {
@@ -200,11 +149,6 @@ def choice_match(a, b):
 
 def build_canonical_ground_truth(sale):
     return {name: fn(sale) for name, fn in CANONICAL_API_MAP.items()}
-
-
-def build_api_ground_truth(sale, form_key):
-    field_map = FORM_FIELD_MAPS.get(form_key, {})
-    return {name: fn(sale) for name, fn in field_map.items()}
 
 
 def _to_float(text):

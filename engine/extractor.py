@@ -732,6 +732,27 @@ CHOICE_FIELD_TARGETS = {
 }
 
 
+def choice_candidates():
+    """{group sub-field name: its option list} for every choice field.
+
+    Published in run()'s output so the UI can locate a choice field's printed
+    option line on the page the same way mark_detector does - by finding the
+    line where the most distinct options co-occur. The UI needs the list but
+    must not restate it: get_group_schema()'s "candidates" already drives both
+    the prompt's option list and the geometric detector, and a second copy
+    could drift out of agreement with them.
+    """
+    by_name = {
+        field["field"]: field
+        for spec in get_group_schema().values() for field in spec["fields"]
+    }
+    return {
+        sub_field: by_name[sub_field]["candidates"]
+        for sub_field in CHOICE_FIELD_TARGETS
+        if (by_name.get(sub_field) or {}).get("candidates")
+    }
+
+
 def resolve_choice_fields_geometrically(pdf_path, ocr_df=None):
     """Resolves the "pick one of N" choice fields by reading the page's
     geometry instead of trusting the vision-LLM, which is unreliable on
@@ -866,6 +887,9 @@ def run(pdf_path, model=LLM_MODEL):
         if override_value is not None:
             fields[field_name] = override_value
     raw["_choice_field_overrides"] = choice_overrides
+    # So the UI can box a choice field by its printed option line rather than
+    # by the selected word alone - see boxes.find_choice_line.
+    raw["_choice_candidates"] = choice_candidates()
 
     # Every party on the form, not just the first - see join_occurrences.
     fields["Landlord Name(s)"] = joined("landlord", "Name")

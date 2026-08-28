@@ -9,15 +9,15 @@ document.
 
 ## Architecture: subprocess delegation
 
-`hybrid_app/app.py` is a lightweight Streamlit UI with no heavy ML
+`app/app.py` is a lightweight Streamlit UI with no heavy ML
 dependencies of its own. It shells out to a separate, heavy-dependency
-venv (`hybrid/.venv`) to run the actual extraction:
+venv (`engine/.venv`) to run the actual extraction:
 
 ```
-app.py --[subprocess]--> hybrid/extractor.py --pdf <file> --output-dir <dir>
+app/app.py --[subprocess]--> engine/extractor.py --pdf <file> --output-dir <dir>
 ```
 
-`hybrid/extractor.py` writes its result as JSON; `app.py` reads that JSON
+`engine/extractor.py` writes its result as JSON; `app/app.py` reads that JSON
 back and renders it. This keeps the UI venv fast to install/run while the
 extraction venv can carry PaddleOCR, OpenCV, PyMuPDF, etc. without
 bloating the UI environment.
@@ -31,8 +31,9 @@ as supplementary grounding context (indexed as `[N] "text" (confidence)`)
 image. This was chosen after this project's own A/B testing showed
 OCR-text-only extraction underperforms on this kind of layout/mark-
 sensitive form (handwriting, circled/struck-through choices — none of
-which OCR text can represent). Full rationale and iteration history:
-`hybrid/RECOMMENDATION.md`.
+which OCR text can represent). Full rationale and iteration history live in
+`RECOMMENDATION.md` in the `hybrid/` project this was extracted from — not
+part of this repo.
 
 On top of that single LLM call, two fields — `Description of
 Property/Property Type` and `Furnished Status` — are **overridden with a
@@ -48,7 +49,7 @@ template).
 
 ## OCR engine: classic PaddleOCR, not PaddleOCR-VL
 
-`hybrid/extractor.py` and `bbox-ocr-extractor/extractor.py` both use the
+`engine/extractor.py` uses the
 classic `PaddleOCR` detection+recognition pipeline (`PP-OCRv6`), not the
 newer `PaddleOCR-VL` document-parsing model. Benchmarked on this machine
 (Apple Silicon, no CUDA — `paddlepaddle-gpu` doesn't apply): `PaddleOCRVL`
@@ -64,12 +65,12 @@ override above, and by the box-matching prefix fallback below — so the
 ## Bounding-box design: template-agnostic, not per-form-layout
 
 Every extracted field's box comes from one of two sources, in
-`hybrid_app/app.py`'s `collect_field_boxes()`:
+`app/app.py`'s `collect_field_boxes()`:
 
 1. **The LLM's own `source_index` citation** (`BOX_COLOR_CITED`, blue) —
    every field the LLM extracts is asked to also cite which OCR-recognized
    line backed a printed value. When present, that OCR line's box (from
-   `hybrid/extractor.py`'s `get_ocr_boxes_normalized()`) is used directly.
+   `engine/extractor.py`'s `get_ocr_boxes_normalized()`) is used directly.
 2. **A text-match fallback** (`BOX_COLOR_MATCHED`, orange) — for values
    the LLM can't cite an OCR line for (chiefly the 2 choice fields, whose
    value comes from a circled/struck visual mark, not printed OCR text),
@@ -92,28 +93,43 @@ already run for grounding.
 ## Model selection: two benchmarked models, cloud gated on quota
 
 The UI offers a choice of extraction model, passed straight through to
-`hybrid/extractor.py --model`. `hybrid_app/models.py` owns everything that
+`engine/extractor.py --model`. `app/models.py` owns everything that
 talks to the Ollama daemon and every decision about whether a model is
 offerable, keeping `app.py` about UI.
 
 Exactly **two** models are offered, as a fixed list rather than everything
 Ollama has installed:
 
-| Model | Where | A/B accuracy | Time/doc |
-|---|---|---|---|
-| `minimax-m3:cloud` | cloud | 96.4% | ~87s |
-| `qwen3-vl:8b-instruct` | local | 90.2% | ~254s |
+| Model | Where | A/B accuracy | Full pipeline | Time/doc |
+|---|---|---|---|---|
+| `minimax-m3:cloud` | cloud | 92.0% | **93.8%** | ~87s A/B, ~197s full |
+| `qwen3-vl:8b-instruct` | local | 85.7% | not measured | ~254s |
 
-These are the two measured by `hybrid/ab_benchmark.py` against
-`hybrid/ground_truth.json` on 4 documents × 28 fields (numbers above are the
-OCR-grounded arm). Other installed models may be vision-capable, but they are
-unmeasured on this document type, so they aren't offered — the list is meant
-to widen only after a model has been benchmarked, not automatically.
+Two different measurements, so keep them apart:
+
+- **A/B accuracy** is `ab_benchmark.py`'s OCR-grounded arm (`B_vision_grounded`),
+  which calls `extract_vision_grounded()` directly and therefore stops *before*
+  the geometric choice-field override. It's the number that justified choosing
+  OCR-grounding over vision-only, not the number the app delivers.
+- **Full pipeline** is `run()` — what `app/app.py` actually shells out to,
+  override included — scored against the same answer key.
+
+Both are 4 documents × 28 fields against the hand-built `ground_truth.json`
+in the sibling `hybrid/` project (neither the benchmark nor its answer key is
+part of this repo; the documents carry real NRICs). Scoring gives no substring
+credit, so a partial address or a truncated clause counts as wrong.
+
+The local model has only ever been measured on the A/B arm, so its full-pipeline
+figure is left blank rather than assumed to gain the same ~1.8 points.
+
+Other installed models may be vision-capable, but they are unmeasured on this
+document type, so they aren't offered — the list is meant to widen only after a
+model has been benchmarked, not automatically.
 
 **Rate-limit gating.** A cloud model that has exhausted its quota is removed
 from the dropdown and shown beneath it with the reason, rather than left
 selectable to fail mid-run. The distinction that matters is between the two
-kinds of HTTP 429 `hybrid/extractor.py`'s `call_llm()` already separates:
+kinds of HTTP 429 `engine/extractor.py`'s `call_llm()` already separates:
 
 - a transient burst limit, which `call_llm` retries with backoff and gets
   through — the model is fine and **stays selectable**; and
@@ -154,6 +170,6 @@ classification is tested directly rather than only through the UI.
 extraction using type-aware matchers (`dates_match`, `amounts_match`,
 `ids_match`, `choice_match`, falling back to `compare.py`'s
 `values_match`). `VLLM_ALIASES` maps each canonical ground-truth field
-name to hybrid's own flat output field names, since `hybrid/extractor.py`
+name to the engine's own flat output field names, since `engine/extractor.py`
 deliberately mirrors `vllm-schema-extractor`'s field naming so this same
 alias map (already used by `streamlit_app/app.py`) works unmodified.
