@@ -103,7 +103,7 @@ Ollama has installed:
 | Model | Where | A/B accuracy | Full pipeline | Time/doc |
 |---|---|---|---|---|
 | `minimax-m3:cloud` | cloud | 92.0% | **93.8%** | ~87s A/B, ~197s full |
-| `qwen3-vl:8b-instruct` | local | 85.7% | not measured | ~254s |
+| `qwen3-vl:8b-instruct` | local | 85.7% | **90.2%** | ~254s A/B, ~561s full |
 
 Two different measurements, so keep them apart:
 
@@ -119,8 +119,24 @@ in the sibling `hybrid/` project (neither the benchmark nor its answer key is
 part of this repo; the documents carry real NRICs). Scoring gives no substring
 credit, so a partial address or a truncated clause counts as wrong.
 
-The local model has only ever been measured on the A/B arm, so its full-pipeline
-figure is left blank rather than assumed to gain the same ~1.8 points.
+The override is worth more to the weaker model — **+4.5 points** locally against
+**+1.8** on the cloud one — which is what you'd expect: it replaces exactly the
+visual judgement an 8B is worst at with a deterministic read.
+
+Two caveats the headline numbers hide:
+
+- **The override's abstention leaks on a weak model.** When the detector finds a
+  choice line with nothing marked, it returns `None`, which means "keep the LLM's
+  answer" — so an unmarked Furnished Status became `"Not"` and `"Partly"` on two
+  documents. That's 2 of the local model's 11 misses. `None` currently conflates
+  "found the line, definitively unmarked" (the answer is `""`, and the detector
+  knows it) with "couldn't locate a choice line at all" (genuinely defer). Only
+  the second deserves deference. Invisible on the cloud model, which answers `""`
+  unprompted.
+- **OCR grounding reduces character-level misreads, it doesn't eliminate them.**
+  The local model still produced `NICHOLAS DOI` for `NICHOLAS OOI` with grounding
+  active — the very example cited above. The +10.7 A/B gain is a corpus-level
+  statistical improvement, not a guarantee on any given field.
 
 Other installed models may be vision-capable, but they are unmeasured on this
 document type, so they aren't offered — the list is meant to widen only after a

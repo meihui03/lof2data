@@ -97,13 +97,18 @@ Two are offered, both benchmarked on real LOF forms:
 | Model | | Accuracy | Time/doc |
 |---|---|---|---|
 | `minimax-m3:cloud` | cloud | 93.8% | ~197s |
-| `qwen3-vl:8b-instruct` | local | 85.7%\* | ~254s |
+| `qwen3-vl:8b-instruct` | local | 90.2% | ~561s |
 
 Measured end-to-end through `run()` — the path the app actually takes, geometric
-override included — on 4 documents × 28 fields, with no substring credit.
-\*the local model has only been measured on the benchmark arm that stops before
-the override, so its real figure is likely a little higher. See
-[DESIGN.md](DESIGN.md) for what the two measurements mean.
+override included — on 4 documents × 28 fields, with no substring credit. See
+[DESIGN.md](DESIGN.md) for how this differs from the A/B benchmark figure.
+
+3.6 points and ~3x the wall-clock is the real trade. Neither model dominates
+field-by-field: the local one won a document outright, and on one address the
+two misread *different* halves of the same line. The local model's remaining
+weaknesses are concentrated — character-level misreads on handwriting, and
+dropping the second party from a multi-occurrence role (a company tenant's
+individual signatory, a second witness).
 
 A cloud model that has exhausted its quota is removed from the dropdown with
 the reason shown, rather than left selectable to fail mid-run — detected by a
