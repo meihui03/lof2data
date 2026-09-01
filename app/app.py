@@ -216,13 +216,16 @@ st.markdown(f"""
 .hero-title {{ color: {DARK}; font-size: 2.5rem; font-weight: 700; text-align: center; margin-bottom: 0.25rem; }}
 .hero-tagline {{ color: #4A5A66; text-align: center; font-size: 1.1rem; margin-bottom: 1.5rem; }}
 .step-card {{
-    background: white; border-radius: 12px; padding: 1.25rem;
+    background: white; border-radius: 12px; padding: 1.75rem 1.25rem;
     border: 1px solid #E1E8ED; text-align: center; height: 160px;
     box-sizing: border-box; display: flex; flex-direction: column;
-    justify-content: center;
+    /* flex-start, not center: centring the whole block makes a card whose
+       description wraps to two lines sit its title higher than its
+       neighbours', so the row of titles looks ragged. */
+    justify-content: flex-start;
 }}
-.step-card h4 {{ color: {DARK}; margin: 0.25rem 0; }}
-.step-card p {{ color: #6B7A85; font-size: 0.9rem; margin: 0; }}
+.step-card h4 {{ color: {DARK}; margin: 0 0 0.6rem 0; line-height: 1.3; }}
+.step-card p {{ color: #6B7A85; font-size: 0.9rem; margin: 0; line-height: 1.45; }}
 .section-label {{
     color: white; background: {DARK}; display: inline-block;
     padding: 0.2rem 0.9rem; border-radius: 999px; font-size: 0.85rem;
@@ -252,7 +255,10 @@ STEPS = [
     ("Vision + OCR Grounding", "The image is read directly, with OCR text as a supporting reference"),
     ("Compare & Review", "Matched against the real record, field by field"),
 ]
-cols = st.columns(4)
+# Derived from STEPS, not hardcoded: a fixed count leaves zip() silently
+# dropping the spare columns, which reads as a gap on the right when a step
+# is added or removed.
+cols = st.columns(len(STEPS))
 for col, (title, desc) in zip(cols, STEPS):
     with col:
         st.markdown(
