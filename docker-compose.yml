@@ -1,0 +1,33 @@
+services:
+  app:
+    build: .
+    # paddlepaddle publishes no linux/arm64 wheel (only manylinux x86_64), so
+    # the image has to be amd64 everywhere. Native on an Intel/AMD machine;
+    # emulated on Apple Silicon, where extraction is slower but works.
+    platform: linux/amd64
+    ports:
+      - "8501:8501"
+    # Read from the host at `up` time, so STAGING_API_PASSWORD is injected as a
+    # runtime variable and never baked into an image layer (.env is in
+    # .dockerignore for the same reason). Copy .env.example to .env first.
+    env_file:
+      - .env
+    environment:
+      # Ollama runs on the host, not in this compose file: it wants GPU access,
+      # and it is usually already installed. host.docker.internal is how the
+      # container reaches it.
+      - OLLAMA_HOST=http://host.docker.internal:11434
+      # See the Dockerfile - one interpreter serves both the UI and the engine
+      # subprocess, so this overrides the default engine/.venv/bin/python3.
+      - LOF2DATA_ENGINE_PYTHON=/usr/local/bin/python
+    extra_hosts:
+      # Docker Desktop (macOS/Windows) resolves host.docker.internal already;
+      # this line is what makes it work on Linux hosts too.
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # PaddleOCR downloads its detection/recognition models on first use.
+      # Persisting them keeps that a one-time cost rather than every restart.
+      - paddle_models:/root/.paddlex
+
+volumes:
+  paddle_models:

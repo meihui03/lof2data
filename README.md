@@ -51,7 +51,42 @@ engine/    extraction — OCR, prompting, choice-field detection
 | `engine/extractor.py` | OCR, prompt building, extraction, flattening |
 | `engine/mark_detector.py` | template-free reader for circled/struck choices |
 
-## Setup
+## Run with Docker
+
+The quickest way in, and the one to hand someone else. Needs Docker and a
+running [Ollama](https://ollama.com) on the host, with a vision model pulled:
+
+```bash
+ollama pull qwen3-vl:8b-instruct   # skip if you already have a vision model
+docker compose up --build
+```
+
+Then open <http://localhost:8501>.
+
+`.env` has to sit next to `docker-compose.yml` — if you were handed this folder
+it's already there; if you cloned the repo, `cp .env.example .env` and fill in
+`STAGING_API_PASSWORD` first. Compose reads it at startup, so the credential is
+never baked into the image.
+
+If port 8501 is already taken (`address already in use` — another Streamlit app
+is the usual culprit), change `"8501:8501"` to `"8601:8501"` in
+`docker-compose.yml` and use <http://localhost:8601> instead.
+
+The first build downloads ~1GB of wheels and takes 10–15 minutes; after that
+`docker compose up` starts in seconds. PaddleOCR fetches its OCR models on the
+first extraction and keeps them in a named volume, so that cost is one-time too.
+
+Ollama stays on the host rather than in the compose file — it wants GPU access,
+and it's usually already installed. The container reaches it at
+`host.docker.internal`. To use the cloud model instead, sign in to your own
+ollama.com account on the host (`ollama signin`); the app probes for it at page
+load and offers whichever models actually work on your machine.
+
+The image is pinned to `linux/amd64` because `paddlepaddle` publishes no
+linux/arm64 wheel. On Apple Silicon it runs emulated — fine for trying it out,
+noticeably slower for real extraction.
+
+## Setup without Docker
 
 Requires Python 3.9+ and a running [Ollama](https://ollama.com) with at least
 one vision model pulled.

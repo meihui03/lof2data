@@ -1,0 +1,22 @@
+# Virtualenvs - 1.3GB, and their absolute paths are baked to the build host.
+.venv
+app/.venv
+engine/.venv
+
+# The credential is injected at runtime via compose's env_file, so it must
+# never end up in an image layer.
+.env
+.env.*
+
+# Real documents and anything derived from them (see .gitignore).
+*.pdf
+input/
+output/
+ground_truth.json
+
+__pycache__
+*.py[cod]
+.pytest_cache
+.git
+.gitignore
+.DS_Store
