@@ -53,17 +53,92 @@ def normalize_source_indexes(source_index):
     return indexes
 
 
-def cited_boxes(ocr_by_index, source_index):
+def normalize_leaf(leaf):
+    """A field's parsed value as a {value, confidence, source_index} dict,
+    whatever shape the model actually used.
+
+    The prompt asks for that envelope and nothing enforces it. Seen on a real
+    run: every party in every group came back as a bare string -
+
+        landlord: [{"Name": "TAN SIEW KIAU", "NRIC/Passport No.": "6406..."}]
+
+    extractor._safe_leaf already absorbs this on the flattening side, which is
+    why the comparison table filled in normally while the box collector - which
+    skipped anything that wasn't a dict - drew nothing for the entire signature
+    block. Both sides need the same tolerance or they disagree about what was
+    extracted, and the disagreement shows up as silently missing boxes."""
+    if isinstance(leaf, dict):
+        return leaf
+    return {"value": leaf, "confidence": None, "source_index": None}
+
+
+# How extractor.join_occurrences joins a repeatable role into one field.
+# Spaces on both sides matter: "A/L" and "S/O" in Malaysian names, and
+# "NRIC/Passport No.", contain a bare slash that is not a separator.
+OCCURRENCE_SEPARATOR = " / "
+
+
+def split_occurrences(value):
+    """A flattened repeatable field back into its individual values.
+
+    "Landlord Name(s)" can hold two co-landlords joined with " / ", and no
+    single OCR line contains both - so a box lookup has to search for each
+    one separately or it finds nothing at all."""
+    if not value:
+        return []
+    return [part.strip() for part in str(value).split(OCCURRENCE_SEPARATOR) if part.strip()]
+
+
+def _alphanumeric(text):
+    return re.sub(r"[^a-z0-9]", "", str(text).lower())
+
+
+def citation_is_plausible(ocr_text, value):
+    """Does `ocr_text` - the line a model cited - actually back `value`?
+
+    A citation is just a number in model JSON and nothing makes it correct.
+    An index that merely resolves gets a confidently-drawn box on the wrong
+    part of the page, which is worse than no box: on a real run the whole
+    signature block's boxes landed in the upper half of the form, leaving
+    that block looking unread.
+
+    Meaningful overlap rather than equality, because values are routinely
+    reformatted - an added "RM", different punctuation, a label stripped off
+    the front - and a long value may be cited across two wrapped lines, so
+    either side containing the other counts. The 4-character run is the same
+    rule extractor.verify_source_index documents for this job; that function
+    is engine-side and needs a DataFrame, so the rule lives here too, where
+    the UI can apply it before drawing."""
+    value_norm, ocr_norm = _alphanumeric(value), _alphanumeric(ocr_text)
+    if not value_norm or not ocr_norm:
+        return False
+    if value_norm in ocr_norm or ocr_norm in value_norm:
+        return True
+    return len(value_norm) >= 4 and any(
+        value_norm[i:i + 4] in ocr_norm for i in range(len(value_norm) - 3)
+    )
+
+
+def cited_boxes(ocr_by_index, source_index, value=None):
     """The OCR boxes a field's citation points at, in citation order.
 
     Returns [] when the citation is missing, malformed, or names lines that
     aren't in this document's OCR result - all of which mean "no usable
-    citation", so the caller can fall back to locating the value by text."""
-    return [
+    citation", so the caller can fall back to locating the value by text.
+
+    Pass `value` to also drop cited lines whose text doesn't back it (see
+    citation_is_plausible). A citation that survives is worth trusting over a
+    text match; one that doesn't is worse than nothing, so it goes and the
+    caller falls back. Omitting `value` keeps every resolvable citation, for
+    callers with nothing to validate against."""
+    found = [
         ocr_by_index[index]
         for index in normalize_source_indexes(source_index)
         if index in ocr_by_index
     ]
+    if value is None:
+        return found
+    return [b for b in found if citation_is_plausible(b.get("text", ""), value)]
 
 
 # Shortest value that can be looked up as a bare substring. Below this, a
@@ -76,12 +151,22 @@ _MIN_SUBSTRING_LEN = 5
 _MIN_DISTINCT_CANDIDATES = 2
 
 
+def _collapse_whitespace(text):
+    """Runs of whitespace to one space.
+
+    Forms pad with spaces to push a value up against a printed rule - the text
+    layer holds ": RM     4,400.00" while the model returns "RM 4,400.00" - so
+    matching literally loses a box for a value sitting right there. Collapsing
+    both sides makes the padding invisible without joining separate words."""
+    return re.sub(r"\s+", " ", str(text)).strip()
+
+
 def _contains_word(haystack, needle):
     """Is `needle` present in `haystack` as a whole word? Lookarounds rather
     than \\b so a needle that ends in punctuation ("SDN. BHD.") still anchors
     correctly - \\b after a '.' never matches."""
-    pattern = r"(?<![A-Za-z0-9])" + re.escape(needle) + r"(?![A-Za-z0-9])"
-    return re.search(pattern, haystack, re.IGNORECASE) is not None
+    pattern = r"(?<![A-Za-z0-9])" + re.escape(_collapse_whitespace(needle)) + r"(?![A-Za-z0-9])"
+    return re.search(pattern, _collapse_whitespace(haystack), re.IGNORECASE) is not None
 
 
 def find_box_by_text(ocr_boxes, value):
@@ -99,7 +184,7 @@ def find_box_by_text(ocr_boxes, value):
     Returns None when nothing matches, or when the value is too short to
     search for at all - no box beats a confidently wrong one.
     """
-    needle = str(value).strip()
+    needle = _collapse_whitespace(value)
     if len(needle) < 2:
         return None
 
@@ -110,16 +195,52 @@ def find_box_by_text(ocr_boxes, value):
     if len(needle) < _MIN_SUBSTRING_LEN:
         return None
 
-    upper = needle.upper()
+    upper = _collapse_whitespace(needle).upper()
     for box in ocr_boxes:
-        if upper in box.get("text", "").upper():
+        if upper in _collapse_whitespace(box.get("text", "")).upper():
             return box
 
+    # A multi-word value is often returned whole by the model while OCR split
+    # it across lines, so no single line contains all of it. Fall back to the
+    # line sharing the most words with it. NOT the prefix tier below: four
+    # characters of a long value identify nothing - an address beginning
+    # "NO. 50, JALAN ..." matched "Business Reg No. ..." on the prefix "NO. "
+    # and boxed the letterhead.
+    if " " in needle:
+        return _best_word_overlap(ocr_boxes, needle)
+
+    # One word whose tail OCR clipped ("FULLY" recognized as "FULL"). Only a
+    # single word can be mangled that way.
     prefix = upper[:4]
     for box in ocr_boxes:
-        if prefix in box.get("text", "").upper():
+        if prefix in _collapse_whitespace(box.get("text", "")).upper():
             return box
     return None
+
+
+# Words shorter than this are skipped when comparing a wrapped value against a
+# line - "no", "of", "7" coincide constantly and carry no locating power.
+_MIN_OVERLAP_WORD_LEN = 3
+
+# A single word in common is coincidence. Two is a location.
+_MIN_OVERLAP_WORDS = 2
+
+
+def _best_word_overlap(ocr_boxes, value):
+    """The OCR line sharing the most distinct words with `value`, or None if
+    no line shares enough to be more than coincidence."""
+    wanted = {w for w in re.split(r"[^a-z0-9]+", value.lower())
+              if len(w) >= _MIN_OVERLAP_WORD_LEN}
+    if not wanted:
+        return None
+
+    best, best_count = None, 0
+    for box in ocr_boxes:
+        words = set(re.split(r"[^a-z0-9]+", box.get("text", "").lower()))
+        count = len(wanted & words)
+        if count > best_count:
+            best, best_count = box, count
+    return best if best_count >= _MIN_OVERLAP_WORDS else None
 
 
 def find_choice_line(ocr_boxes, candidates):

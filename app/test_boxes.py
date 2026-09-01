@@ -100,6 +100,135 @@ class TestCitedBoxes(unittest.TestCase):
                          ["LETTER OF OFFER"])
 
 
+class TestNormalizeLeaf(unittest.TestCase):
+    """The prompt asks for {value, confidence, source_index} per field, and
+    nothing makes the model comply. Observed on a real run: every party in
+    every group came back as a BARE STRING -
+
+        landlord: [{"Name": "TAN SIEW KIAU", "NRIC/Passport No.": "6406..."}]
+
+    The flattener already tolerates that (extractor._safe_leaf), so the
+    comparison table filled in normally, while the box collector skipped every
+    non-dict leaf and the whole signature block went unboxed. Same tolerance
+    has to exist on both sides or they disagree about what was extracted."""
+
+    def test_a_bare_string_becomes_a_leaf(self):
+        self.assertEqual(boxes.normalize_leaf("TAN SIEW KIAU"),
+                         {"value": "TAN SIEW KIAU", "confidence": None, "source_index": None})
+
+    def test_a_proper_leaf_is_unchanged(self):
+        leaf = {"value": "x", "confidence": 0.9, "source_index": 3}
+        self.assertEqual(boxes.normalize_leaf(leaf), leaf)
+
+    def test_a_number_becomes_a_leaf(self):
+        self.assertEqual(boxes.normalize_leaf(2200)["value"], 2200)
+
+    def test_none_becomes_an_empty_leaf(self):
+        self.assertIsNone(boxes.normalize_leaf(None)["value"])
+
+    def test_a_partial_dict_keeps_its_keys(self):
+        # Some models return {"value": ...} with no confidence/source_index.
+        self.assertEqual(boxes.normalize_leaf({"value": "x"})["value"], "x")
+        self.assertIsNone(boxes.normalize_leaf({"value": "x"}).get("source_index"))
+
+
+class TestSplitOccurrences(unittest.TestCase):
+    """A repeatable role is flattened into one field joined with " / "
+    (extractor.join_occurrences), so "Landlord Name(s)" can hold two people.
+    No single OCR line contains both, so the joined string has to be split
+    back apart before anything tries to locate it."""
+
+    def test_two_parties_split(self):
+        self.assertEqual(boxes.split_occurrences("ALICE TAN / BRIAN LIM"),
+                         ["ALICE TAN", "BRIAN LIM"])
+
+    def test_single_value_is_left_alone(self):
+        self.assertEqual(boxes.split_occurrences("ALICE TAN"), ["ALICE TAN"])
+
+    def test_blank_is_empty(self):
+        self.assertEqual(boxes.split_occurrences(""), [])
+        self.assertEqual(boxes.split_occurrences(None), [])
+
+    def test_a_slash_inside_a_value_is_not_a_separator(self):
+        # The separator is " / " with spaces; "A/L" and "S/O" in Malaysian
+        # names, and "NRIC/Passport", must survive.
+        self.assertEqual(boxes.split_occurrences("SATHISWARAN A/L THAMBYRAJAH"),
+                         ["SATHISWARAN A/L THAMBYRAJAH"])
+
+    def test_blank_segments_are_dropped(self):
+        self.assertEqual(boxes.split_occurrences("ALICE TAN /  / BRIAN LIM"),
+                         ["ALICE TAN", "BRIAN LIM"])
+
+
+class TestCitationIsPlausible(unittest.TestCase):
+    """Does the OCR line a model cited actually back the value it extracted?
+
+    A citation is just a number in model JSON, and nothing makes it correct.
+    An index that happens to exist gets a confidently-drawn box on the wrong
+    part of the page - seen on a real run, where the whole signature block's
+    boxes landed in the upper half of the form and that block looked bare.
+    Values are routinely reformatted (an added RM, different punctuation), so
+    this checks for meaningful overlap rather than an exact match."""
+
+    def test_exact_line_backs_the_value(self):
+        self.assertTrue(boxes.citation_is_plausible(": LEM SIEW YUEN", "LEM SIEW YUEN"))
+
+    def test_reformatted_amount_still_backs_it(self):
+        # The model adds "RM" and the form prints only the digits.
+        self.assertTrue(boxes.citation_is_plausible(": 2,200.00", "RM 2,200.00"))
+
+    def test_label_prefix_still_backs_it(self):
+        self.assertTrue(boxes.citation_is_plausible("Date:   2026-03-31", "2026-03-31"))
+
+    def test_value_spanning_two_lines_backs_each(self):
+        # An address the PDF wraps; each cited line is a slice of the value.
+        value = "5, LORONG MARKISAH 23, TAMAN MARKISAH, 14000 BUKIT MERTAJAM, PULAU PINANG"
+        self.assertTrue(boxes.citation_is_plausible(": 5, LORONG MARKISAH 23, TAMAN MARKISAH, 14000", value))
+        self.assertTrue(boxes.citation_is_plausible("BUKIT MERTAJAM, PULAU PINANG", value))
+
+    def test_unrelated_line_does_not_back_it(self):
+        # The actual bug: a tenant name cited against the property-type line.
+        self.assertFalse(boxes.citation_is_plausible(
+            "Description of Property: House / Semi-D / Bungalow / Condo", "LEM SIEW YUEN"))
+
+    def test_wrong_nric_does_not_back_it(self):
+        self.assertFalse(boxes.citation_is_plausible(": 931130-14-6848", "960314105840"))
+
+    def test_blank_value_is_not_checkable(self):
+        self.assertFalse(boxes.citation_is_plausible("anything", ""))
+
+
+class TestCitedBoxesValidation(unittest.TestCase):
+    OCR = [
+        {"index": 0, "page": 0, "text": "Description of Property: House / Condo"},
+        {"index": 1, "page": 0, "text": ": LEM SIEW YUEN"},
+        {"index": 2, "page": 0, "text": ": 5, LORONG MARKISAH 23, TAMAN MARKISAH, 14000"},
+        {"index": 3, "page": 0, "text": "BUKIT MERTAJAM, PULAU PINANG"},
+    ]
+    BY_INDEX = {b["index"]: b for b in OCR}
+
+    def test_implausible_citation_is_dropped(self):
+        # Caller gets [] and falls back to locating the value by text.
+        self.assertEqual(boxes.cited_boxes(self.BY_INDEX, 0, value="LEM SIEW YUEN"), [])
+
+    def test_plausible_citation_is_kept(self):
+        result = boxes.cited_boxes(self.BY_INDEX, 1, value="LEM SIEW YUEN")
+        self.assertEqual([b["index"] for b in result], [1])
+
+    def test_multi_line_citation_keeps_every_backing_line(self):
+        value = "5, LORONG MARKISAH 23, TAMAN MARKISAH, 14000 BUKIT MERTAJAM, PULAU PINANG"
+        result = boxes.cited_boxes(self.BY_INDEX, [2, 3], value=value)
+        self.assertEqual([b["index"] for b in result], [2, 3])
+
+    def test_mixed_citation_keeps_only_the_backing_line(self):
+        result = boxes.cited_boxes(self.BY_INDEX, [0, 1], value="LEM SIEW YUEN")
+        self.assertEqual([b["index"] for b in result], [1])
+
+    def test_without_a_value_every_resolvable_citation_is_kept(self):
+        # Unchanged behaviour when there is nothing to validate against.
+        self.assertEqual([b["index"] for b in boxes.cited_boxes(self.BY_INDEX, [0, 1])], [0, 1])
+
+
 class TestFindBoxByText(unittest.TestCase):
     """The fallback used when a model cites no source_index - which is ALWAYS
     the case for the two choice fields, whose value comes from a circled or
@@ -140,6 +269,63 @@ class TestFindBoxByText(unittest.TestCase):
         # through - "FULLY" recognized as "FULL". The prefix path must survive.
         ocr = [{"index": 0, "page": 0, "text": "NOT / PARTLY / FULL FURNISHED"}]
         self.assertEqual(boxes.find_box_by_text(ocr, "FULLY")["index"], 0)
+
+    def test_prefix_fallback_does_not_apply_to_a_multi_word_value(self):
+        # Seen on a real scan: an address starting "NO. 50, JALAN ..." matched
+        # "Business Reg No. 201801002938" on its 4-char prefix "NO. " and boxed
+        # the letterhead. The clipped-character case is about ONE word, so a
+        # value with spaces must not use this path - no box beats a wrong one.
+        ocr = [
+            {"index": 0, "page": 0, "text": "Business Reg No. 201801002938 (1264951-W)"},
+            {"index": 1, "page": 0, "text": "somewhere else entirely"},
+        ]
+        address = "NO. 50, JALAN IMPIAN EMAS 7, TAMAN IMPIAN EMAS, 81300 SKUDAI, JOHOR."
+        self.assertIsNone(boxes.find_box_by_text(ocr, address))
+
+    def test_multi_word_value_still_found_when_it_genuinely_appears(self):
+        ocr = [{"index": 0, "page": 0, "text": ": NO. 50, JALAN IMPIAN EMAS 7"}]
+        self.assertEqual(boxes.find_box_by_text(ocr, "NO. 50, JALAN IMPIAN EMAS 7")["index"], 0)
+
+    def test_runs_of_whitespace_are_not_a_difference(self):
+        # Forms pad with spaces to align a value against a printed rule:
+        #   ': RM     4,400.00'   (five spaces)
+        # while the model returns "RM 4,400.00" with one. Matching literally
+        # loses the box for a value sitting right there.
+        ocr = [{"index": 0, "page": 0, "text": ": RM     4,400.00"}]
+        self.assertEqual(boxes.find_box_by_text(ocr, "RM 4,400.00")["index"], 0)
+
+    def test_leading_and_trailing_space_is_ignored(self):
+        ocr = [{"index": 0, "page": 0, "text": "   TAN SIEW KIAU   "}]
+        self.assertEqual(boxes.find_box_by_text(ocr, "TAN SIEW KIAU")["index"], 0)
+
+    def test_a_tab_counts_as_whitespace(self):
+        ocr = [{"index": 0, "page": 0, "text": "Date:\t\t2026-03-19"}]
+        self.assertEqual(boxes.find_box_by_text(ocr, "Date: 2026-03-19")["index"], 0)
+
+    def test_whitespace_collapsing_does_not_join_separate_words(self):
+        # "RM 4,400.00" must not match a line that merely has RM and 4,400.00
+        # in unrelated places.
+        ocr = [{"index": 0, "page": 0, "text": "RM is the currency; unrelated 9,999.00"}]
+        self.assertIsNone(boxes.find_box_by_text(ocr, "RM 4,400.00"))
+
+    def test_wrapped_value_matches_the_line_sharing_most_words(self):
+        # A long address the model returns whole but OCR split across lines:
+        # no single line contains all of it, so fall back to the line that
+        # shares the most words rather than giving up.
+        ocr = [
+            {"index": 0, "page": 0, "text": "Business Reg No. 201801002938 (1264951-W)"},
+            {"index": 1, "page": 0, "text": "NO. 50, JALAN IMPIAN EMAS 7, TAMAN IMPIAN EMAS,"},
+            {"index": 2, "page": 0, "text": "81300 SKUDAI, JOHOR."},
+        ]
+        address = "NO. 50, JALAN IMPIAN EMAS 7, TAMAN IMPIAN EMAS, 81300 SKUDAI, JOHOR."
+        self.assertEqual(boxes.find_box_by_text(ocr, address)["index"], 1)
+
+    def test_one_shared_word_is_not_enough(self):
+        # The letterhead shares only "NO" with the address - a single common
+        # word is coincidence, not a location.
+        ocr = [{"index": 0, "page": 0, "text": "Business Reg No. 201801002938 (1264951-W)"}]
+        address = "NO. 50, JALAN IMPIAN EMAS 7, TAMAN IMPIAN EMAS, 81300 SKUDAI, JOHOR."
+        self.assertIsNone(boxes.find_box_by_text(ocr, address))
 
     def test_empty_value_returns_none(self):
         self.assertIsNone(boxes.find_box_by_text(self.CHOICE_PAGE, ""))
