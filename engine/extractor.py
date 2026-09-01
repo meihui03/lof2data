@@ -263,6 +263,15 @@ def call_llm(prompt, model=LLM_MODEL, host=OLLAMA_URL, json_mode=True, timeout=9
         start = time.monotonic()
         response = requests.post(host, json=payload, timeout=timeout)
         elapsed = time.monotonic() - start
+        if response.status_code == 402:
+            # The cloud allowance is spent and the model needs a paid plan.
+            # Never retryable, so fail fast like the quota 429 below - and
+            # keep Ollama's own wording, which names the fix. models.py's
+            # looks_rate_limited() matches on it to take the model out of the
+            # selector rather than let it be picked again.
+            raise RuntimeError(
+                f"Ollama cloud subscription required: {response.text.strip()}"
+            )
         if response.status_code == 429:
             if "session usage limit" in response.text:
                 raise RuntimeError(

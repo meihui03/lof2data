@@ -31,6 +31,7 @@ OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 
 AVAILABLE = "available"
 RATE_LIMITED = "rate_limited"
+PAYMENT_REQUIRED = "payment_required"
 NOT_INSTALLED = "not_installed"
 UNREACHABLE = "unreachable"
 
@@ -49,16 +50,22 @@ SUPPORTED_MODELS = [
 # had a selector - so the default selection preserves existing behaviour.
 PREFERRED_DEFAULT = "minimax-m3:cloud"
 
-# Substring that marks the non-retryable quota 429 (see module docstring).
-# Matches the condition extractor.call_llm raises RuntimeError on.
+# Substrings that mark the two non-retryable cloud refusals (see module
+# docstring). Both match text extractor.call_llm raises RuntimeError on.
 _QUOTA_MARKER = "session usage limit"
+# Ollama cloud's 402 body: "this model requires a subscription or extra
+# usage, upgrade for access at https://ollama.com/upgrade".
+_PAYMENT_MARKER = "requires a subscription"
 
 BLOCK_REASONS = {
     RATE_LIMITED: "cloud usage limit reached - try again after the quota window resets",
+    PAYMENT_REQUIRED: ("cloud allowance spent - this model now needs a subscription "
+                       "or extra usage: https://ollama.com/settings"),
     NOT_INSTALLED: "not installed - run `ollama pull` for it first",
     UNREACHABLE: "unreachable - the daemon did not answer for this model",
 }
-_SESSION_REASON = "hit its usage limit during a run in this session - use Re-check once it resets"
+_SESSION_REASON = ("became unavailable during a run in this session (usage limit or "
+                   "subscription required) - use Re-check once that's resolved")
 
 
 def is_cloud(name):
@@ -69,10 +76,18 @@ def is_cloud(name):
 
 
 def classify_probe(status_code, body_text):
-    """Turns one probe response into AVAILABLE / RATE_LIMITED / UNREACHABLE.
-    Pure, so the rate-limit rule can be tested without a daemon."""
+    """Turns one probe response into AVAILABLE / RATE_LIMITED /
+    PAYMENT_REQUIRED / UNREACHABLE. Pure, so the rules can be tested without
+    a daemon."""
     if status_code == 200:
         return AVAILABLE
+    if status_code == 402:
+        # The cloud allowance is spent and the model now needs a paid plan.
+        # Classified on the status code alone - 402 is unambiguous, and the
+        # body wording is Ollama's to change. This used to fall through to
+        # UNREACHABLE, which told the user the daemon hadn't answered when it
+        # had answered instantly with the actual, actionable reason.
+        return PAYMENT_REQUIRED
     if status_code == 429:
         if _QUOTA_MARKER in (body_text or "").lower():
             return RATE_LIMITED
@@ -81,9 +96,16 @@ def classify_probe(status_code, body_text):
 
 
 def looks_rate_limited(stderr):
-    """Did a failed extraction fail because of the cloud quota? Reads the
-    subprocess stderr that run_hybrid_extraction surfaces."""
-    return _QUOTA_MARKER in (stderr or "").lower()
+    """Did a failed extraction fail because the cloud model is out of
+    allowance - either a hard quota 429 or a 402 needing a paid plan? Reads
+    the subprocess stderr that run_hybrid_extraction surfaces.
+
+    Both count, because the consequence is the same: the model is dead for
+    now and must come out of the selector. Matching only the 429 wording let
+    a 402 through, so the user could pick the same dead model again and lose
+    another full OCR pass to it."""
+    text = (stderr or "").lower()
+    return _QUOTA_MARKER in text or _PAYMENT_MARKER in text
 
 
 def partition(supported, probe_results, session_rate_limited=frozenset()):

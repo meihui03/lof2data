@@ -49,6 +49,20 @@ class TestClassifyProbe(unittest.TestCase):
         self.assertEqual(models.classify_probe(429, "Too Many Requests"),
                          models.AVAILABLE)
 
+    def test_402_is_payment_required_not_unreachable(self):
+        # Ollama cloud's real response once the free allowance is spent. It
+        # used to fall through to UNREACHABLE, telling the user "the daemon
+        # did not answer" when the daemon had answered immediately with the
+        # actual reason - which hid the one fact they needed.
+        body = ('{"error":"this model requires a subscription or extra usage, '
+                'upgrade for access at https://ollama.com/upgrade"}')
+        self.assertEqual(models.classify_probe(402, body),
+                         models.PAYMENT_REQUIRED)
+
+    def test_402_is_payment_required_whatever_the_body(self):
+        # The status code alone is unambiguous; don't depend on wording.
+        self.assertEqual(models.classify_probe(402, ""), models.PAYMENT_REQUIRED)
+
     def test_server_error_is_unreachable(self):
         self.assertEqual(models.classify_probe(500, "boom"), models.UNREACHABLE)
 
@@ -92,6 +106,21 @@ class TestPartition(unittest.TestCase):
         _, blocked = models.partition(
             self.SUPPORTED, {"minimax-m3:cloud": models.UNREACHABLE})
         self.assertIn("unreachable", blocked[0][1].lower())
+
+    def test_payment_required_reason_is_actionable(self):
+        # The whole point of the fix: say what's wrong and where to fix it,
+        # rather than "the daemon did not answer".
+        _, blocked = models.partition(
+            self.SUPPORTED, {"minimax-m3:cloud": models.PAYMENT_REQUIRED})
+        reason = blocked[0][1].lower()
+        self.assertIn("subscription", reason)
+        self.assertIn("ollama.com", reason)
+        self.assertNotIn("did not answer", reason)
+
+    def test_payment_required_leaves_the_local_model_usable(self):
+        usable, _ = models.partition(
+            self.SUPPORTED, {"minimax-m3:cloud": models.PAYMENT_REQUIRED})
+        self.assertEqual(usable, ["qwen3-vl:8b-instruct"])
 
     def test_uninstalled_model_is_blocked_with_a_pull_hint(self):
         _, blocked = models.partition(
@@ -145,6 +174,15 @@ class TestLooksRateLimited(unittest.TestCase):
         # What run_hybrid_extraction surfaces when call_llm gives up:
         stderr = ("RuntimeError: Ollama cloud session usage limit reached: "
                   '{"error":"session usage limit"}')
+        self.assertTrue(models.looks_rate_limited(stderr))
+
+    def test_detects_a_402_hit_mid_extraction(self):
+        # A 402 during a real run must also take the model out of the
+        # selector. Matching only "session usage limit" let it through, so
+        # the user could pick the same dead model again and lose another
+        # full OCR pass to it.
+        stderr = ('RuntimeError: Ollama cloud subscription required: '
+                  '{"error":"this model requires a subscription or extra usage"}')
         self.assertTrue(models.looks_rate_limited(stderr))
 
     def test_ignores_unrelated_failures(self):
