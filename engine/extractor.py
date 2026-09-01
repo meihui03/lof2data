@@ -139,6 +139,29 @@ def get_field_schema():
     ]
 
 
+def format_field_line(field):
+    """One field as a prompt line: "- Name: description".
+
+    The schema's declared "type" is deliberately NOT put in the prompt. It
+    looks like free accuracy - three of the cloud model's misses were fields
+    declared "number" that came back as prose ("RM 2,800 (Ringgit Malaysia Two
+    Thousand Eight Hundred Only)") - so annotating the line as
+    "Monthly Rental (number)" was tried and MEASURED on the local model:
+
+        vision-only, file.pdf, no annotation :  26/28
+        vision-only, file.pdf, "(number)"    :  19/28
+
+    Every numeric field came back as an empty string instead. Whatever the
+    mechanism, the model preferred returning nothing over returning a value it
+    could not render as a bare number - trading a scoring miss for no data at
+    all, which is worse. The prose-formatting problem is real, but the fix has
+    to be something that does not let the model answer with silence.
+
+    Left as a function rather than an inline f-string so the finding has
+    somewhere to live and one place changes every prompt builder."""
+    return f"- {field['field']}: {field['description']}"
+
+
 def get_field_schema_df():
     """Same schema as get_field_schema(), as a DataFrame for easy viewing."""
     return pd.DataFrame(get_field_schema())
@@ -231,7 +254,37 @@ def get_group_schema_df():
     return pd.DataFrame(rows)
 
 
-def call_llm(prompt, model=LLM_MODEL, host=OLLAMA_URL, json_mode=True, timeout=900, images=None, return_meta=False):
+def build_chat_payload(prompt, model, images, json_mode, schema=None):
+    """The /api/chat body for one call.
+
+    num_ctx is raised for EVERY call, not just vision ones. It used to be set
+    only when images were attached, so a text-mode call - which carries the
+    document's whole recognized text in its prompt - ran at Ollama's default
+    context, overflowed, and had its reply truncated mid-JSON. That failed
+    deterministically at the same character on every retry, which is what
+    makes it worth pinning: it does not look like a context problem from the
+    outside, it looks like the model emitting bad JSON."""
+    message = {"role": "user", "content": prompt}
+    if images:
+        message["images"] = images
+    payload = {
+        "model": model,
+        "messages": [message],
+        "stream": False,
+        "options": {"num_ctx": 16384},
+    }
+    if schema is not None:
+        # A JSON Schema here makes the reply's shape a constraint on
+        # generation rather than a request in the prompt - the model cannot
+        # emit an unknown key or a wrong-typed value. Supersedes plain
+        # "json", which only asks for valid JSON of any shape.
+        payload["format"] = schema
+    elif json_mode:
+        payload["format"] = "json"
+    return payload
+
+
+def call_llm(prompt, model=LLM_MODEL, host=OLLAMA_URL, json_mode=True, timeout=900, images=None, return_meta=False, schema=None):
     """Sends a prompt to the given Ollama model via the local daemon -
     which proxies a '-cloud' model name to Ollama's cloud - and returns
     the raw text response. Pass images (a list of base64 PNGs, e.g. from
@@ -245,18 +298,7 @@ def call_llm(prompt, model=LLM_MODEL, host=OLLAMA_URL, json_mode=True, timeout=9
     free-tier quota, not a short-lived burst limit (no Retry-After header,
     and it didn't clear after ~15s of backoff), so retrying just wastes
     time until the quota window resets on its own."""
-    message = {"role": "user", "content": prompt}
-    if images:
-        message["images"] = images
-    payload = {
-        "model": model,
-        "messages": [message],
-        "stream": False,
-    }
-    if images:
-        payload["options"] = {"num_ctx": 16384}
-    if json_mode:
-        payload["format"] = "json"
+    payload = build_chat_payload(prompt, model, images, json_mode, schema=schema)
 
     max_retries = 5
     for attempt in range(max_retries):
@@ -477,7 +519,7 @@ def build_ocr_prompt(ocr_df, fields):
     determined from text alone (e.g. a circled/struck-through choice, which
     OCR text carries no signal for at all), so those fields can be flagged
     for a vision-mode fallback later instead of trusting a guess."""
-    field_lines = "\n".join(f"- {f['field']}: {f['description']}" for f in fields)
+    field_lines = "\n".join(format_field_line(f) for f in fields)
     return (
         "Below is OCR-extracted text from a scanned form, one line per "
         "detected text region with the OCR engine's own confidence score:\n\n"
@@ -516,7 +558,7 @@ def build_group_prompt(ocr_df, group_name, spec):
     asks for a JSON ARRAY (one object per occurrence, since there can be
     more than one), a non-multiple group (property) asks for a single JSON
     object - same {value, confidence, source_index} shape either way."""
-    field_lines = "\n".join(f"- {f['field']}: {f['description']}" for f in spec["fields"])
+    field_lines = "\n".join(format_field_line(f) for f in spec["fields"])
     value_shape = "{\"value\": ..., \"confidence\": ..., \"source_index\": ...}"
     if spec["multiple"]:
         instruction = (
@@ -641,11 +683,11 @@ def build_vision_grounded_prompt(fields, group_schema, ocr_df, num_pages):
     what's reported in the IDP literature (e.g. LandingAI's Agentic
     Document Extraction, Azure's GPT text+vision samples): OCR-as-citation
     alongside the image, not OCR-as-replacement-input."""
-    field_lines = "\n".join(f"- {f['field']}: {f['description']}" for f in fields)
+    field_lines = "\n".join(format_field_line(f) for f in fields)
 
     group_sections = []
     for group_name, spec in group_schema.items():
-        sub_lines = "\n".join(f"    - {f['field']}: {f['description']}" for f in spec["fields"])
+        sub_lines = "\n".join("    " + format_field_line(f) for f in spec["fields"])
         shape_note = (
             "return a JSON ARRAY of objects, one per occurrence, [] if none found"
             if spec["multiple"] else "return a single JSON object"
@@ -692,7 +734,138 @@ def build_vision_grounded_prompt(fields, group_schema, ocr_df, num_pages):
     )
 
 
-def extract_vision_grounded(pdf_path, model=LLM_MODEL, ocr_df=None, return_meta=False, max_parse_retries=2):
+def build_vision_only_prompt(fields, group_schema, num_pages):
+    """The ungrounded prompt: identical schema and output contract to
+    build_vision_grounded_prompt, with two things removed - the OCR text
+    block, and the "source_index" citation, which means nothing when there is
+    no OCR index to cite.
+
+    Kept deliberately identical otherwise, because that is what makes the two
+    a fair comparison: the A/B benchmark measured this arm at 92.0% on the
+    cloud model against 94.6% grounded, in a third of the wall clock. Held
+    constant so the only variable is the grounding itself."""
+    field_lines = "\n".join(format_field_line(f) for f in fields)
+
+    group_sections = []
+    for group_name, spec in group_schema.items():
+        sub_lines = "\n".join("    " + format_field_line(f) for f in spec["fields"])
+        shape_note = (
+            "return a JSON ARRAY of objects, one per occurrence, [] if none found"
+            if spec["multiple"] else "return a single JSON object"
+        )
+        group_sections.append(f'"{group_name}" ({spec["description"]} - {shape_note}):\n{sub_lines}')
+    groups_block = "\n\n".join(group_sections)
+
+    page_note = (
+        f"You are given all {num_pages} pages of the same form, in order - "
+        "a field's value may be on any page, so check all of them.\n\n"
+        if num_pages > 1 else ""
+    )
+    value_shape = "{\"value\": ..., \"confidence\": ...}"
+
+    return (
+        "You are reading a scanned or digitally-generated PropNex \"Letter "
+        "of Offer to Rent\" form. Look directly at the page image(s) for "
+        "every value, including handwritten entries, circled options, and "
+        "struck-through options (a struck-through option is NOT selected; "
+        "an un-struck or circled option IS selected) - the image is your "
+        "only source of truth.\n\n"
+        f"{page_note}"
+        "Extract these top-level fields, each as an object with \"value\" "
+        "and \"confidence\" (0.0-1.0):\n"
+        f"{field_lines}\n\n"
+        "Also extract these groups of fields, using the same "
+        f"{value_shape} shape for every sub-field:\n\n"
+        f"{groups_block}\n\n"
+        "Return ONLY a single JSON object with exactly two top-level keys: "
+        "\"fields\" (an object mapping each top-level field name above to "
+        f"its {value_shape}) and \"groups\" (an object with keys " +
+        ", ".join(f'"{g}"' for g in group_schema) + ", each value an "
+        "array of objects for a \"multiple\" group or a single object "
+        "otherwise, as specified above)."
+    )
+
+
+def ungrounded_box_lines(pdf_path, dpi=150):
+    """Box-anchor lines for a run with grounding off, or [] when getting them
+    would cost what the toggle was turned off to avoid.
+
+    The toggle's purpose is to keep the document's text OUT OF THE PROMPT -
+    that is where the thousands of tokens go. It was never meant to throw away
+    the boxes too, and on a born-digital PDF it does not have to: the text
+    layer is read in milliseconds and carries the document's own exact
+    coordinates, so the source boxes survive an ungrounded run for free.
+
+    A scan is different - its lines only exist after a full PaddleOCR pass,
+    ~100s, which is precisely the cost being skipped. There the boxes go, and
+    the UI says so."""
+    if not grounding_is_cheap(_has_text_layer(pdf_path)):
+        return []
+    return get_ocr_boxes_normalized(
+        pdf_path, ocr_df=_native_text_dataframe(pdf_path, dpi=dpi), dpi=dpi)
+
+
+def grounding_is_cheap(has_text_layer):
+    """Is OCR grounding effectively free for this document?
+
+    A born-digital PDF is read through its own text layer in milliseconds
+    (see ocr_to_dataframe), so grounding costs nothing and there is nothing
+    for the toggle to save. A scan needs a full PaddleOCR pass - 100s+ per
+    document, and roughly two thirds of a grounded run's wall clock. Turning
+    grounding off only buys time in the second case."""
+    return bool(has_text_layer)
+
+
+def extract_vision_only(pdf_path, model=LLM_MODEL, return_meta=False, max_parse_retries=2):
+    """Ungrounded extraction: image(s) + schema, one call, no OCR anywhere in
+    the path. Mirrors extract_vision_grounded's retry-on-unparseable-JSON so a
+    call-level fluke isn't scored as an accuracy difference between them."""
+    images_b64 = render_pdf_to_base64_images(pdf_path)
+    prompt = build_vision_only_prompt(get_field_schema(), get_group_schema(), len(images_b64))
+
+    last_error = None
+    for attempt in range(max_parse_retries + 1):
+        result = call_llm(prompt, model=model, images=images_b64, return_meta=return_meta)
+        raw, meta = result if return_meta else (result, None)
+        try:
+            parsed = parse_llm_json(raw)
+            break
+        except json.JSONDecodeError as e:
+            last_error = e
+            print(f"  Could not parse LLM response as JSON (attempt {attempt + 1}/"
+                  f"{max_parse_retries + 1}): {e}. Retrying...", file=sys.stderr)
+    else:
+        raise last_error
+
+    fields = parsed.get("fields", {}) if isinstance(parsed, dict) else {}
+    groups_raw = parsed.get("groups", {}) if isinstance(parsed, dict) else {}
+    groups = {
+        name: _unwrap_group_array(groups_raw.get(name), spec)
+        for name, spec in get_group_schema().items()
+    }
+    extracted = {"fields": fields, "groups": groups}
+    return (extracted, meta) if return_meta else extracted
+
+
+SCHEMA_MODES = ("prompt", "pydantic")
+
+
+def _format_schema(schema_mode):
+    """The JSON Schema to constrain generation with, or None for the original
+    prompt-only behaviour.
+
+    "pydantic" imports schema_models lazily: that module imports this one, so
+    a module-level import would be circular, and the dependency only exists
+    when the mode is actually used."""
+    if schema_mode not in SCHEMA_MODES:
+        raise ValueError(f"unknown schema_mode {schema_mode!r}; expected one of {SCHEMA_MODES}")
+    if schema_mode != "pydantic":
+        return None
+    import schema_models
+    return schema_models.extraction_json_schema()
+
+
+def extract_vision_grounded(pdf_path, model=LLM_MODEL, ocr_df=None, return_meta=False, max_parse_retries=2, schema_mode="prompt"):
     """Vision-primary extraction: sends the page image(s) plus OCR text
     (as grounding context, not a replacement) in a single call, covering
     both get_field_schema() and get_group_schema() at once. Returns
@@ -709,10 +882,12 @@ def extract_vision_grounded(pdf_path, model=LLM_MODEL, ocr_df=None, return_meta=
         ocr_df = ocr_to_dataframe(pdf_path)
     images_b64 = render_pdf_to_base64_images(pdf_path)
     prompt = build_vision_grounded_prompt(get_field_schema(), get_group_schema(), ocr_df, len(images_b64))
+    schema = _format_schema(schema_mode)
 
     last_error = None
     for attempt in range(max_parse_retries + 1):
-        result = call_llm(prompt, model=model, images=images_b64, return_meta=return_meta)
+        result = call_llm(prompt, model=model, images=images_b64, return_meta=return_meta,
+                          schema=schema)
         raw, meta = result if return_meta else (result, None)
         try:
             parsed = parse_llm_json(raw)
@@ -851,7 +1026,7 @@ def _resolve_choice_raster(pdf_path, ocr_df, candidates, dpi=150):
     return answer or ring_pick
 
 
-def run(pdf_path, model=LLM_MODEL):
+def run(pdf_path, model=LLM_MODEL, grounded=True, schema_mode="prompt"):
     """Runs the vision-primary + OCR-grounding extraction
     (extract_vision_grounded) and flattens the nested {fields, groups}
     result into a single flat "fields" dict, using the SAME field names
@@ -866,13 +1041,61 @@ def run(pdf_path, model=LLM_MODEL):
     value came from which party) stays in raw["groups"] via
     extract_vision_grounded() directly, and is kept here too under "_raw".
 
+    grounded=False drops the text pass entirely and extracts from the image
+    alone (extract_vision_only). Note "the text pass" is not always OCR:
+    ocr_to_dataframe reads a born-digital PDF's own text layer and only falls
+    back to PaddleOCR for a scan. It removes two costs, not one: obtaining
+    that text, AND the several thousand tokens of recognized text that would
+    otherwise be pasted into the prompt. The second matters even when the
+    first is free - a born-digital PDF's text layer is read in milliseconds,
+    yet dropping it still took the local model from 440s to 107s on file.pdf
+    (8,070 -> 4,761 prompt tokens) for one field of accuracy, because that
+    model is bound by how much prompt it reads. The cloud model is bound by
+    how much it writes instead, so there the same switch bought 92.0% vs
+    94.6% and was sometimes SLOWER. Note what else goes with it:
+    no OCR lines means no source boxes for the UI to draw, and the
+    choice-field override falls back to the LLM's own read on a SCAN (the
+    born-digital path reads vector geometry and needs no OCR, so it still
+    applies). The source boxes survive on a born-digital PDF, whose text layer
+    is free to read - see ungrounded_box_lines - and go only on a scan, where
+    obtaining them means the OCR pass this arm exists to skip.
+
     Returns {"fields": {...flat...}, "template": None, "_raw": {...},
     "_meta": {"prompt_eval_count", "eval_count", "time_s"}} - "template" is
     always None (this schema is universal like vllm's, not per-template
     like bbox-ocr-extractor's, so no classification needed)."""
+    if not grounded:
+        return _run_ungrounded(pdf_path, model=model)
     ocr_df = ocr_to_dataframe(pdf_path)
-    raw, meta = extract_vision_grounded(pdf_path, model=model, ocr_df=ocr_df, return_meta=True)
+    raw, meta = extract_vision_grounded(pdf_path, model=model, ocr_df=ocr_df,
+                                        return_meta=True, schema_mode=schema_mode)
 
+    fields = flatten_fields(raw)
+
+    # Override the LLM's own read of the choice fields with the geometric
+    # detector - see resolve_choice_fields_geometrically's docstring for why,
+    # and note it abstains (leaving the LLM's answer) rather than guessing.
+    choice_overrides = resolve_choice_fields_geometrically(pdf_path, ocr_df=ocr_df)
+    for field_name, override_value in choice_overrides.items():
+        if override_value is not None:
+            fields[field_name] = override_value
+    raw["_choice_field_overrides"] = choice_overrides
+    # So the UI can box a choice field by its printed option line rather than
+    # by the selected word alone - see boxes.find_choice_line.
+    raw["_choice_candidates"] = choice_candidates()
+
+    return {
+        "fields": fields, "template": None, "_raw": raw, "_meta": meta,
+        "grounded": True,
+        "_ocr_boxes": get_ocr_boxes_normalized(pdf_path, ocr_df=ocr_df),
+    }
+
+
+def flatten_fields(raw):
+    """Collapses extract_vision_grounded/extract_vision_only's nested
+    {fields, groups} into the single flat dict the UI and the ground-truth
+    comparison expect. Shared by both arms so the toggle can only change
+    WHERE the values came from, never how they are named or joined."""
     def value_of(d, key):
         return _safe_leaf((d or {}).get(key)).get("value")
 
@@ -887,18 +1110,6 @@ def run(pdf_path, model=LLM_MODEL):
     fields["Title Details"] = value_of(property_fields, "Title Details")
     fields["Premise Usage"] = value_of(property_fields, "Usage")
     fields["Furnished Status"] = value_of(property_fields, "Furnished Status")
-
-    # Override the LLM's own read of the choice fields with the geometric
-    # detector - see resolve_choice_fields_geometrically's docstring for why,
-    # and note it abstains (leaving the LLM's answer) rather than guessing.
-    choice_overrides = resolve_choice_fields_geometrically(pdf_path, ocr_df=ocr_df)
-    for field_name, override_value in choice_overrides.items():
-        if override_value is not None:
-            fields[field_name] = override_value
-    raw["_choice_field_overrides"] = choice_overrides
-    # So the UI can box a choice field by its printed option line rather than
-    # by the selected word alone - see boxes.find_choice_line.
-    raw["_choice_candidates"] = choice_candidates()
 
     # Every party on the form, not just the first - see join_occurrences.
     fields["Landlord Name(s)"] = joined("landlord", "Name")
@@ -916,11 +1127,41 @@ def run(pdf_path, model=LLM_MODEL):
     # two extractors' output convention (app.py's lookup_extracted does
     # `str(value).strip()`, which would render None as the literal string
     # "None" otherwise).
-    fields = {k: ("" if v is None else v) for k, v in fields.items()}
+    return {k: ("" if v is None else v) for k, v in fields.items()}
+
+
+def _run_ungrounded(pdf_path, model=LLM_MODEL):
+    """run()'s grounded=False path: one vision call, no OCR anywhere.
+
+    Two things are deliberately absent rather than faked. "_ocr_boxes" is
+    empty because there are no recognized lines to point at, so the UI draws
+    no source boxes - see app.py, which says so rather than showing a blank
+    tab. And the choice-field override runs ONLY on the born-digital path,
+    which reads the PDF's own vector strikethrough and needs no OCR; on a
+    scan it would need an OCR pass, which is the very cost this arm exists to
+    avoid, so the LLM's own read stands."""
+    raw, meta = extract_vision_only(pdf_path, model=model, return_meta=True)
+    fields = flatten_fields(raw)
+
+    with fitz.open(pdf_path) as pdf:
+        native = len(pdf[0].get_text().strip()) > 100
+
+    choice_overrides = {target: None for target in CHOICE_FIELD_TARGETS.values()}
+    if native:
+        choice_overrides = resolve_choice_fields_geometrically(pdf_path)
+        for field_name, override_value in choice_overrides.items():
+            if override_value is not None:
+                fields[field_name] = override_value
+    raw["_choice_field_overrides"] = choice_overrides
+    raw["_choice_candidates"] = choice_candidates()
 
     return {
         "fields": fields, "template": None, "_raw": raw, "_meta": meta,
-        "_ocr_boxes": get_ocr_boxes_normalized(pdf_path, ocr_df=ocr_df),
+        "grounded": False,
+        # Kept when they are free to obtain - see ungrounded_box_lines. The
+        # toggle skips the text in the PROMPT, not the boxes, so a digital
+        # form still shows where every value came from.
+        "_ocr_boxes": ungrounded_box_lines(pdf_path),
     }
 
 
@@ -935,6 +1176,18 @@ def main():
                         help=f"Ollama model to use (default: {LLM_MODEL}). Must be vision-capable.")
     parser.add_argument("--output-dir", default=str(Path(__file__).parent / "output"),
                         help="Where to write <pdf-stem>.json (default: ./output).")
+    parser.add_argument("--schema-mode", default="prompt", choices=list(SCHEMA_MODES),
+                        help="How the reply's shape is enforced. 'prompt' (default) asks for "
+                             "it in the prompt and parses whatever comes back. 'pydantic' "
+                             "passes a JSON Schema generated from the same field definitions, "
+                             "so Ollama constrains generation to it.")
+    parser.add_argument("--no-grounding", action="store_true",
+                        help="Don't give the model the document's text; extract from "
+                             "the image alone. "
+                             "Roughly 3x faster on a scan, for about 2.6 points of "
+                             "accuracy - and no source boxes. Saves nothing on a "
+                             "born-digital PDF, whose text layer is read in "
+                             "milliseconds.")
     args = parser.parse_args()
 
     pdf_paths = [args.pdf]
@@ -945,7 +1198,8 @@ def main():
     for pdf_path in pdf_paths:
         print(f"\n=== {pdf_path} ===", file=sys.stderr)
         start = time.monotonic()
-        result = run(pdf_path, model=args.model)
+        result = run(pdf_path, model=args.model, grounded=not args.no_grounding,
+                     schema_mode=args.schema_mode)
         elapsed = time.monotonic() - start
         print(f"Time taken: {elapsed:.1f}s", file=sys.stderr)
 

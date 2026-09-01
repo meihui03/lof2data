@@ -162,7 +162,9 @@ Stdlib `unittest`, no extra dependency:
 app/.venv/bin/python3 app/test_boxes.py
 app/.venv/bin/python3 app/test_models.py
 app/.venv/bin/python3 app/test_groundtruth.py
+app/.venv/bin/python3 app/test_app_ui.py
 engine/.venv/bin/python3 engine/test_extractor_flatten.py
+engine/.venv/bin/python3 engine/test_schema_models.py
 ```
 
 ## Notes
