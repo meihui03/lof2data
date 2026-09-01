@@ -241,7 +241,7 @@ div[data-testid="stButton"] button:disabled:active {{
 
 st.markdown('<div class="hero-title">lof2data</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="hero-tagline">Extract PropNex Letter of Offer fields with vision + OCR grounding, '
+    '<div class="hero-tagline">Extract Letter of Offer fields with vision + OCR grounding, '
     'verified against the real record.</div>',
     unsafe_allow_html=True,
 )
@@ -250,7 +250,6 @@ st.markdown("#### How it works")
 STEPS = [
     ("Upload & Identify", "Upload the PDF, enter the Sale No."),
     ("Vision + OCR Grounding", "The image is read directly, with OCR text as a supporting reference"),
-    ("Verify & Override", "Choice fields are double-checked against the actual page markings"),
     ("Compare & Review", "Matched against the real record, field by field"),
 ]
 cols = st.columns(4)
@@ -419,7 +418,7 @@ if "comparison_df" in st.session_state:
         m1.metric("Time taken", f"{st.session_state['elapsed']:.1f}s")
         m2.metric("Accuracy", f"{st.session_state['accuracy']:.0%}")
         m3.metric("Fields matched", f"{st.session_state['correct']}/{st.session_state['verifiable']}")
-        m4.metric("Model", st.session_state["model_used"])
+        # m4.metric("Model", st.session_state["model_used"])
 
         tab_compare, tab_source = st.tabs(["Field Comparison", "Source Document"])
 
