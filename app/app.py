@@ -54,9 +54,9 @@ VLLM_ALIASES = {
     "Utilities Deposit": ["Utilities Deposit"],
     "Advance Rental": ["Advance Rental"],
     "Total": ["Total Payable"],
-    "Tenant Name": ["Tenant Name(s)/Company"],
+    "Tenant Name": ["Tenant Name(s)/Company", "Purchaser Name(s)"],
     "Tenant IC": ["Tenant NRIC/Passport No."],
-    "Landlord Name": ["Landlord Name(s)"],
+    "Landlord Name": ["Landlord Name(s)", "Vendor Name"],
     "Landlord IC": ["Landlord NRIC/Passport No."],
 }
 
@@ -90,17 +90,19 @@ class RateLimited(RuntimeError):
     the selector instead of just printing a stack trace."""
 
 
-def run_hybrid_extraction(pdf_path, output_dir, model):
+def run_hybrid_extraction(pdf_path, output_dir, model, grounded=True):
     if not ENGINE_PYTHON.exists():
         raise RuntimeError(
             f"Extraction engine interpreter not found at {ENGINE_PYTHON}. "
             "Create it with:  python3 -m venv engine/.venv && "
             "engine/.venv/bin/pip install -r engine/requirements.txt"
         )
+    command = [str(ENGINE_PYTHON), "extractor.py", "--pdf", str(pdf_path),
+               "--model", model, "--output-dir", str(output_dir)]
+    if not grounded:
+        command.append("--no-grounding")
     result = subprocess.run(
-        [str(ENGINE_PYTHON), "extractor.py", "--pdf", str(pdf_path),
-         "--model", model, "--output-dir", str(output_dir)],
-        cwd=str(ENGINE_DIR), capture_output=True, text=True,
+        command, cwd=str(ENGINE_DIR), capture_output=True, text=True,
     )
     if result.returncode != 0:
         if models.looks_rate_limited(result.stderr):
@@ -147,15 +149,21 @@ def collect_field_boxes(result):
     def add_from_leaf(label, leaf, candidates=None):
         if not isinstance(leaf, dict):
             return
+        value = leaf.get("value")
         # A model may cite more than one OCR line for a value that spans
         # them (and may cite it in shapes the prompt didn't ask for) - see
         # boxes.cited_boxes. Draw one box per cited line.
-        cited = boxes.cited_boxes(ocr_by_index, leaf.get("source_index"))
+        #
+        # The citation is checked against the line it names before being
+        # drawn: an index that merely resolves is not evidence it is right,
+        # and a confidently-boxed wrong line is worse than no box. A citation
+        # that fails falls through to the text match below, which on a real
+        # run located every signature-block field the model had misattributed.
+        cited = boxes.cited_boxes(ocr_by_index, leaf.get("source_index"), value=value)
         if cited:
             for b in cited:
                 add_box(label, b, BOX_COLOR_CITED)
             return
-        value = leaf.get("value")
         if not value:
             return
         # A choice field's value is a short, common word ("NOT", "Land") that
@@ -317,11 +325,39 @@ with st.container(border=True):
     for name, reason in blocked:
         st.caption(f":material/block: **{name}** unavailable — {reason}")
 
+    grounded = st.toggle(
+        "Give the model the document's text",
+        value=True,
+        key="grounding",
+        # Deliberately short and non-technical - the measured numbers and the
+        # reasoning behind them live in DESIGN.md, not in a tooltip.
+        help="**On (recommended):** the app reads the document's text first and "
+             "gives it to the AI as a reference. More accurate, and needed to "
+             "highlight where each value was found.\n\n"
+             "**Off:** the AI reads the page as a picture only. Faster, but less "
+             "accurate and no highlights.\n\n"
+             "Turn it off for quick checks, or on clear computer-generated PDFs. "
+             "Leave it on for scans and handwriting.",
+    )
+    # A slot that always exists, filled only when the toggle is off. Adding or
+    # removing an element here instead would shift everything below it in the
+    # element tree, and Streamlit derives an unkeyed widget's identity partly
+    # from that position - which briefly rendered a SECOND Extract button on
+    # every toggle, until reconciliation dropped the stale one.
+    grounding_note = st.empty()
+    if not grounded:
+        grounding_note.caption(
+            ":material/bolt: Faster, but expect lower accuracy — and no highlights "
+            "on the document showing where each value came from."
+        )
+
     btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 1])
     with btn_col2:
+        # Explicit key so the button keeps one identity across reruns no matter
+        # what is rendered above it - belt and braces with the slot above.
         extract_clicked = st.button(
             "Processing..." if st.session_state["is_processing"] else "Extract",
-            type="primary", use_container_width=True,
+            type="primary", use_container_width=True, key="extract",
             disabled=st.session_state["is_processing"] or not usable,
         )
 
@@ -352,7 +388,7 @@ if st.session_state["is_processing"]:
             pdf_path.write_bytes(uploaded_file.getvalue())
 
             start = time.monotonic()
-            result = run_hybrid_extraction(pdf_path, tmpdir, selected_model)
+            result = run_hybrid_extraction(pdf_path, tmpdir, selected_model, grounded)
             elapsed = time.monotonic() - start
 
             # Copy the PDF bytes out of the temp dir before it's cleaned up -
@@ -444,12 +480,22 @@ if "comparison_df" in st.session_state:
             st.dataframe(df, use_container_width=True, hide_index=True)
 
         with tab_source:
-            st.caption(
-                ":blue[:material/square:] blue = the OCR line the LLM cited directly · "
-                ":orange[:material/square:] orange = located by matching the extracted "
-                "value against the OCR text (used when the value came from a visual "
-                "mark, e.g. a circled or struck-through choice)"
-            )
+            # Every box is anchored to an OCR line, so an ungrounded run has
+            # nothing to draw. Say that rather than render an unannotated page
+            # that looks like the boxes silently failed.
+            if not st.session_state["result"].get("_ocr_boxes"):
+                st.info(
+                    "No source boxes for this run — OCR grounding was off, so there "
+                    "are no recognized text lines to anchor them to. Re-run with the "
+                    "**OCR grounding** toggle on to see where each value was read from."
+                )
+            else:
+                st.caption(
+                    ":blue[:material/square:] blue = the OCR line the LLM cited directly · "
+                    ":orange[:material/square:] orange = located by matching the extracted "
+                    "value against the OCR text (used when the value came from a visual "
+                    "mark, e.g. a circled or struck-through choice)"
+                )
             field_boxes = collect_field_boxes(st.session_state["result"])
             pages = render_annotated_pages(st.session_state["pdf_bytes"], field_boxes)
             for i, page_img in enumerate(pages, start=1):
