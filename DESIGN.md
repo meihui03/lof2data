@@ -178,6 +178,34 @@ Getting `rate_limited` vs `available` wrong either locks the user out of a
 working model or wastes a full extraction on a dead one, so that
 classification is tested directly rather than only through the UI.
 
+## Field selection: subtractive, and applied to the prompt
+
+Step 2 lets the user drop fields before a run. Two decisions worth recording.
+
+**It narrows the prompt, not the output.** The obvious implementation is to
+extract everything and hide the columns nobody wanted; that is one line of UI
+code and costs the user nothing they can see. It also spends the tokens and
+the wall-clock on every dropped field, on a local 8B where prompt length is
+the binding constraint — the same constraint the grounding toggle exists to
+relieve. So an excluded field is removed from the prompt's field list, from
+the constrained (`--schema-mode pydantic`) JSON Schema, and from the geometric
+choice-field pass, which is a page-scale pixel read worth skipping in its own
+right.
+
+**It can only subtract.** There is no way to add a field from the UI, and no
+free-text box that looks like one. A field the schema doesn't describe has no
+prompt line, no type, no place in `flatten_fields`, and no ground-truth column
+to be compared against — it would extract into nothing. Adding a field is a
+schema edit, and the UI is built from the schema (`--list-fields`) rather than
+from a list of its own, so it follows automatically.
+
+The mapping from a flattened name to the group sub-field it comes from
+(`FLAT_FROM_GROUPS`) is now the single source of truth shared by
+`flatten_fields()` and `field_sources()`. It used to exist only inside the
+flattener; publishing a second copy for the picker would have drifted, and a
+drifted name fails silently — a checkbox that switches nothing off, or a table
+row that can never be filled.
+
 ## Ground-truth comparison
 
 `sale_no` is used to fetch the real record via

@@ -64,14 +64,23 @@ def _leaf_fields(fields):
     return built
 
 
-def build_extraction_model():
+def build_extraction_model(fields=None, groups=None):
     """The {fields, groups} model matching what extract_vision_grounded asks
     for, with every group nested the way get_group_schema() declares it -
-    a list for a "multiple" role, a single object otherwise."""
-    flat = create_model("FlatFields", **_leaf_fields(E.get_field_schema()))
+    a list for a "multiple" role, a single object otherwise.
+
+    `fields`/`groups` default to the full schema. They are passed explicitly
+    when the caller has narrowed it (the UI's field picker, via
+    extractor.field_schema_for/group_schema_for) - the constrained schema has
+    to match the prompt exactly, or generation would be forced to fill in the
+    very fields the prompt left out."""
+    fields = E.get_field_schema() if fields is None else fields
+    groups = E.get_group_schema() if groups is None else groups
+
+    flat = create_model("FlatFields", **_leaf_fields(fields))
 
     group_attrs = {}
-    for name, spec in E.get_group_schema().items():
+    for name, spec in groups.items():
         group_model = create_model(f"{name.capitalize()}Group", **_leaf_fields(spec["fields"]))
         annotation = List[group_model] if spec["multiple"] else Optional[group_model]
         group_attrs[safe_name(name)] = (
@@ -87,10 +96,10 @@ def build_extraction_model():
     )
 
 
-def extraction_json_schema():
+def extraction_json_schema(fields=None, groups=None):
     """The JSON Schema to hand Ollama as "format". Keyed by display name, so
     the reply parses with the same code the prompt-only path uses."""
-    return build_extraction_model().model_json_schema(by_alias=True)
+    return build_extraction_model(fields, groups).model_json_schema(by_alias=True)
 
 
 def resolve(root, node):

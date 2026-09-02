@@ -45,6 +45,7 @@ engine/    extraction — OCR, prompting, choice-field detection
 | File | What it does |
 |---|---|
 | `app/app.py` | the UI; shells out to the engine, renders results |
+| `app/fields.py` | groups the engine's field list for the picker, and hides a removed field's row |
 | `app/models.py` | which models are offerable, and cloud rate-limit gating |
 | `app/boxes.py` | turns an LLM `source_index` citation into boxes to draw, and locates a box by text when there's no citation |
 | `app/groundtruth.py` | fetches the CRM record and matches values against it |
@@ -116,13 +117,26 @@ cp .env.example .env      # then fill in STAGING_API_PASSWORD
 app/.venv/bin/streamlit run app/app.py
 ```
 
-Enter a Sale No., upload the LOF PDF, pick a model, hit Extract.
+Enter a Sale No., upload the LOF PDF, pick a model, choose which fields you
+want, hit Extract.
+
+**Choosing fields.** Step 2 lists every field the engine can extract, all
+ticked. Untick one and it is left out of the prompt entirely — not extracted
+and then hidden, so it costs no tokens and no time, and its row disappears
+from the comparison table instead of showing up empty and scored as a miss.
+The list is the engine's own (`--list-fields`), so the schema stays the single
+place a field is defined; the picker can only ever narrow it, never add to it.
 
 The engine also runs standalone:
 
 ```bash
 cd engine
 .venv/bin/python3 extractor.py --pdf /path/to/lof.pdf --model minimax-m3:cloud
+
+# what can be extracted, and leaving some of it out
+.venv/bin/python3 extractor.py --list-fields
+.venv/bin/python3 extractor.py --pdf /path/to/lof.pdf \
+    --exclude "Witnessed by" --exclude "Notice to Quit (months)"
 ```
 
 ## Models
@@ -162,9 +176,11 @@ Stdlib `unittest`, no extra dependency:
 app/.venv/bin/python3 app/test_boxes.py
 app/.venv/bin/python3 app/test_models.py
 app/.venv/bin/python3 app/test_groundtruth.py
+app/.venv/bin/python3 app/test_fields.py
 app/.venv/bin/python3 app/test_app_ui.py
 engine/.venv/bin/python3 engine/test_extractor_flatten.py
 engine/.venv/bin/python3 engine/test_schema_models.py
+engine/.venv/bin/python3 engine/test_field_selection.py
 ```
 
 ## Notes

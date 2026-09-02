@@ -19,6 +19,7 @@ from dotenv import load_dotenv
 from PIL import Image, ImageDraw
 
 import boxes
+import fields as field_picker
 import models
 from groundtruth import (
     amounts_match, build_canonical_ground_truth, CANONICAL_FIELD_KINDS,
@@ -93,7 +94,7 @@ class RateLimited(RuntimeError):
     the selector instead of just printing a stack trace."""
 
 
-def run_hybrid_extraction(pdf_path, output_dir, model, grounded=True):
+def run_hybrid_extraction(pdf_path, output_dir, model, grounded=True, exclude=()):
     if not ENGINE_PYTHON.exists():
         raise RuntimeError(
             f"Extraction engine interpreter not found at {ENGINE_PYTHON}. "
@@ -104,6 +105,8 @@ def run_hybrid_extraction(pdf_path, output_dir, model, grounded=True):
                "--model", model, "--output-dir", str(output_dir)]
     if not grounded:
         command.append("--no-grounding")
+    for name in exclude:
+        command += ["--exclude", name]
     result = subprocess.run(
         command, cwd=str(ENGINE_DIR), capture_output=True, text=True,
     )
@@ -114,6 +117,40 @@ def run_hybrid_extraction(pdf_path, output_dir, model, grounded=True):
     out_json = Path(output_dir) / f"{Path(pdf_path).stem}.json"
     with open(out_json, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+@st.cache_data(show_spinner=False)
+def list_engine_fields():
+    """Every field the engine can extract, in its own order.
+
+    Asked of the engine rather than listed here, so the schema stays the one
+    place a field is defined - add one there and it becomes pickable with no
+    edit on this side. Cached with no TTL: it is a subprocess launch, and the
+    answer only changes when the code does.
+
+    Returns [] if the engine can't be reached. The picker then says so and
+    steps aside rather than blocking a run it isn't needed for - an
+    unavailable engine is the extraction's problem to report, not the
+    picker's."""
+    if not ENGINE_PYTHON.exists():
+        return []
+    try:
+        result = subprocess.run(
+            [str(ENGINE_PYTHON), "extractor.py", "--list-fields"],
+            cwd=str(ENGINE_DIR), capture_output=True, text=True, timeout=60,
+        )
+        if result.returncode != 0:
+            return []
+        return list(json.loads(result.stdout))
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return []
+
+
+def field_key(name):
+    """The session-state key for one field's checkbox. Explicit so the
+    checkbox keeps one identity across reruns no matter what is rendered
+    above it - the same reason the Extract button carries a key."""
+    return f"keep::{name}"
 
 
 @st.cache_data(ttl=120, show_spinner=False)
@@ -284,6 +321,7 @@ st.markdown(
 st.markdown("#### How it works")
 STEPS = [
     ("Upload & Identify", "Upload the PDF, enter the Sale No."),
+    ("Choose Fields", "Tick only what you need — the rest is never asked for"),
     ("Vision + OCR Grounding", "The image is read directly, with OCR text as a supporting reference"),
     ("Compare & Review", "Matched against the real record, field by field"),
 ]
@@ -379,14 +417,77 @@ with st.container(border=True):
             "means the slow step this skips."
         )
 
+# Asked once per session (the answer changes only when the engine's schema
+# does) and read before the picker renders, so the checkboxes below are the
+# engine's own list rather than a copy of it kept over here.
+all_fields = list_engine_fields()
+processing = st.session_state["is_processing"]
+
+with st.container(border=True):
+    st.markdown('<span class="section-label">STEP 2</span>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Fields to Extract</div>', unsafe_allow_html=True)
+
+    keep_flags = {}
+    if not all_fields:
+        # An unreachable engine is the extraction's problem to report, with a
+        # far better message than this one could give. Don't block the run
+        # over a picker; extract everything, as it did before this step.
+        st.caption(
+            ":material/info: Couldn't read the field list from the engine, so "
+            "every field will be extracted. Extraction itself will say why if "
+            "the engine really is unavailable."
+        )
+    else:
+        # Read from session state rather than from the checkboxes, which don't
+        # exist yet on this run - the count has to render above them.
+        kept_now = sum(1 for name in all_fields
+                       if st.session_state.get(field_key(name), True))
+        count_col, all_col, none_col = st.columns([4, 1, 1], vertical_alignment="bottom")
+        with count_col:
+            st.caption(
+                f"**{kept_now} of {len(all_fields)}** selected. Untick anything you "
+                "don't need: an unticked field is never put to the model, so it "
+                "costs no time — and no column in the table. The list is the "
+                "form's own; there is nothing to add to it."
+            )
+        with all_col:
+            select_all = st.button("Select all", key="fields_all",
+                                   use_container_width=True, disabled=processing)
+        with none_col:
+            clear_all = st.button("Clear", key="fields_none",
+                                  use_container_width=True, disabled=processing)
+        if select_all or clear_all:
+            # Safe to write these keys here: the checkboxes they belong to are
+            # created below, so on this run they don't exist yet, and the rerun
+            # renders them from the state just written.
+            for name in all_fields:
+                st.session_state[field_key(name)] = bool(select_all)
+            st.rerun()
+
+        # Grouped because 28 checkboxes in one list is a wall - see fields.py,
+        # which owns the grouping and drops a section the engine no longer has.
+        section_cols = st.columns(3)
+        for i, (title, names) in enumerate(field_picker.sectioned_fields(all_fields)):
+            with section_cols[i % len(section_cols)]:
+                st.markdown(f"**{title}**")
+                for name in names:
+                    keep_flags[name] = st.checkbox(
+                        name, value=True, key=field_key(name), disabled=processing)
+                st.write("")
+
+    excluded = field_picker.excluded_from(all_fields, keep_flags)
+    nothing_selected = bool(all_fields) and len(excluded) == len(all_fields)
+    if nothing_selected:
+        st.caption(":material/warning: Pick at least one field to extract.")
+
     btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 1])
     with btn_col2:
         # Explicit key so the button keeps one identity across reruns no matter
         # what is rendered above it - belt and braces with the slot above.
         extract_clicked = st.button(
-            "Processing..." if st.session_state["is_processing"] else "Extract",
+            "Processing..." if processing else "Extract",
             type="primary", use_container_width=True, key="extract",
-            disabled=st.session_state["is_processing"] or not usable,
+            disabled=processing or not usable or nothing_selected,
         )
 
 if extract_clicked and not st.session_state["is_processing"]:
@@ -416,7 +517,8 @@ if st.session_state["is_processing"]:
             pdf_path.write_bytes(uploaded_file.getvalue())
 
             start = time.monotonic()
-            result = run_hybrid_extraction(pdf_path, tmpdir, selected_model, grounded)
+            result = run_hybrid_extraction(pdf_path, tmpdir, selected_model, grounded,
+                                           exclude=excluded)
             elapsed = time.monotonic() - start
 
             # Copy the PDF bytes out of the temp dir before it's cleaned up -
@@ -426,10 +528,20 @@ if st.session_state["is_processing"]:
             st.session_state["pdf_name"] = uploaded_file.name
 
         extracted_fields = result.get("fields", {})
+        # Snapshot what this run left out, so the table below reflects the run
+        # rather than whatever the checkboxes say later. The score follows: a
+        # field nobody asked for is not a field the extractor got wrong.
+        excluded_now = set(excluded)
+        st.session_state["excluded"] = excluded_now
+
         rows, verifiable, correct = [], 0, 0
         for field in CANONICAL_FIELDS:
+            aliases = VLLM_ALIASES.get(field, [field])
+            if field_picker.row_is_hidden(
+                    field_picker.extractable_aliases(aliases, all_fields), excluded_now):
+                continue
             api_value = api_fields.get(field)
-            extracted_value = lookup_extracted(extracted_fields, VLLM_ALIASES.get(field, [field]))
+            extracted_value = lookup_extracted(extracted_fields, aliases)
             has_api_value = api_value not in (None, "")
             if not has_api_value:
                 match_display = "—"
@@ -481,8 +593,16 @@ st.write("")
 
 if "comparison_df" in st.session_state:
     with st.container(border=True):
-        st.markdown('<span class="section-label">STEP 2</span>', unsafe_allow_html=True)
+        st.markdown('<span class="section-label">STEP 3</span>', unsafe_allow_html=True)
         st.markdown('<div class="section-title">Results</div>', unsafe_allow_html=True)
+
+        left_out = st.session_state.get("excluded") or set()
+        if left_out:
+            # Otherwise a short table reads as fields the extractor lost.
+            st.caption(
+                f":material/filter_alt: {len(left_out)} field(s) were left out of "
+                "this run, so they have no row below and count towards nothing."
+            )
 
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Time taken", f"{st.session_state['elapsed']:.1f}s")

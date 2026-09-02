@@ -78,5 +78,66 @@ class TestGroundingNote(unittest.TestCase):
         self.assertTrue(run_app().toggle(key="grounding").value)
 
 
+class TestFieldPicker(unittest.TestCase):
+    """Step 2. The list comes from the engine (`--list-fields`), so these
+    assert the shape of the picker rather than particular field names - the
+    one exception being that it must never offer a way to ADD a field, which
+    is the whole constraint the step exists under."""
+
+    def picker(self, at):
+        return [c for c in at.checkbox if c.key and c.key.startswith("keep::")]
+
+    def test_every_engine_field_gets_a_checkbox(self):
+        at = run_app()
+        self.assertEqual(len(self.picker(at)), len(app_module_fields()))
+
+    def test_they_all_start_ticked(self):
+        at = run_app()
+        self.assertTrue(all(c.value for c in self.picker(at)))
+
+    def test_there_is_no_way_to_add_a_field(self):
+        # No free-text input anywhere in the picker: the schema is the engine's,
+        # and the UI can only ever narrow it.
+        at = run_app()
+        self.assertEqual([i for i in at.text_input if i.label != "Sale No."], [])
+
+    def test_unticking_one_leaves_the_rest_selected(self):
+        at = run_app()
+        first = self.picker(at)[0]
+        at.checkbox(key=first.key).set_value(False).run()
+        still_on = [c for c in self.picker(at) if c.value]
+        self.assertEqual(len(still_on), len(app_module_fields()) - 1)
+
+    def test_clearing_everything_disables_extract(self):
+        # The engine refuses a run with nothing to extract; the button should
+        # never get that far.
+        at = run_app()
+        at.button(key="fields_none").click().run()
+        self.assertTrue(all(not c.value for c in self.picker(at)))
+        self.assertTrue(at.button(key="extract").disabled)
+
+    def test_select_all_puts_them_back(self):
+        at = run_app()
+        at.button(key="fields_none").click().run()
+        at.button(key="fields_all").click().run()
+        self.assertTrue(all(c.value for c in self.picker(at)))
+        self.assertFalse(at.button(key="extract").disabled)
+
+    def test_still_exactly_one_extract_button_after_unticking(self):
+        # Same structural hazard the grounding toggle hit: a conditional
+        # element (the "pick at least one field" caption) renders above the
+        # button, and the button's identity must not depend on it.
+        at = run_app()
+        at.button(key="fields_none").click().run()
+        extract = [b for b in at.button if b.label in ("Extract", "Processing...")]
+        self.assertEqual(len(extract), 1)
+
+
+def app_module_fields():
+    """What the engine publishes - asked the same way app.py asks."""
+    import app as app_module
+    return app_module.list_engine_fields()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

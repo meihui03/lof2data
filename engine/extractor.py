@@ -254,6 +254,108 @@ def get_group_schema_df():
     return pd.DataFrame(rows)
 
 
+# The flattened name run() publishes <- (group, sub-field) it is read from.
+# Single source of truth for that mapping, shared by flatten_fields() (which
+# applies it) and field_sources() (which reports it). Written out once because
+# two copies would drift, and a drifted name fails SILENTLY: the flattener, the
+# comparison table and the ground-truth scorer all key on the exact display
+# name, so a mismatch yields an empty row rather than an error.
+FLAT_FROM_GROUPS = (
+    ("Description of Property/Property Type", "property", "Description/Property Type"),
+    ("Property Address", "property", "Address"),
+    ("Title Details", "property", "Title Details"),
+    ("Premise Usage", "property", "Usage"),
+    ("Furnished Status", "property", "Furnished Status"),
+    ("Landlord Name(s)", "landlord", "Name"),
+    ("Landlord NRIC/Passport No.", "landlord", "NRIC/Passport No."),
+    ("Tenant Name(s)/Company", "tenant", "Name/Company"),
+    ("Tenant NRIC/Passport No.", "tenant", "NRIC/Passport No."),
+    ("Tenant Address", "tenant", "Address"),
+    ("Negotiator/Agent Name", "agent", "Name"),
+    ("Witnessed by", "witness", "Name"),
+)
+
+
+def field_sources():
+    """{flattened field name: where its value comes from}, in output order.
+
+    ("field", name) for a top-level field, ("group", group, sub-field) for one
+    the flattener lifts out of a group. This is the engine's answer to "what
+    can be extracted" - the UI's picker is built from it rather than from a
+    list of its own, so a field added to the schema becomes pickable with no
+    second edit, and one removed stops being offered.
+
+    Note the group sub-fields NOT listed here (a party's designation, a
+    signature date) are deliberately absent: they never reach the flat output,
+    so there is nothing for a picker to show or a table to hide.
+    """
+    sources = {f["field"]: ("field", f["field"]) for f in get_field_schema()}
+    for flat_name, group, sub_field in FLAT_FROM_GROUPS:
+        sources[flat_name] = ("group", group, sub_field)
+    return sources
+
+
+def selectable_fields():
+    """Just the names from field_sources(), for --list-fields."""
+    return list(field_sources())
+
+
+def _excluded_names(exclude):
+    """The exclusion argument as a set, tolerating None."""
+    return {str(name) for name in (exclude or ())}
+
+
+def field_schema_for(exclude=()):
+    """get_field_schema() minus the excluded fields.
+
+    Excluding is subtractive on purpose: the picker can only ever narrow this
+    list, never extend it. A name the schema doesn't have is ignored rather
+    than rejected - a stale name in a caller's list must not fail a run.
+    """
+    dropped = _excluded_names(exclude)
+    return [f for f in get_field_schema() if f["field"] not in dropped]
+
+
+def group_schema_for(exclude=()):
+    """get_group_schema() minus the excluded fields, by their FLATTENED names.
+
+    A group's sub-field is dropped when the flat name it feeds is excluded,
+    and the whole group goes when every flat name it feeds has gone - asking
+    for a landlord object whose name and NRIC are both switched off would burn
+    prompt tokens on an answer nothing downstream reads. Sub-fields that feed
+    no flat name (designation, signature date) ride along with their group,
+    since no picker offers them and no table shows them.
+
+    Known artifact, accepted: the landlord and tenant descriptions tell the
+    model not to file a witness under them, "see the 'witness' group" - and
+    that pointer dangles if the witness group has itself been dropped. The
+    instruction that matters (do NOT include them here) still stands, so the
+    field this protects is still protected; only the suggested destination is
+    missing. Not worth rewriting descriptions per-selection unless a real run
+    is shown to mis-file a witness because of it.
+    """
+    dropped = _excluded_names(exclude)
+    if not dropped:
+        return get_group_schema()
+
+    sub_field_of = {}   # (group, sub-field) -> flat name
+    exposed = {}        # group -> [flat name, ...]
+    for flat_name, group, sub_field in FLAT_FROM_GROUPS:
+        sub_field_of[(group, sub_field)] = flat_name
+        exposed.setdefault(group, []).append(flat_name)
+
+    kept = {}
+    for group, spec in get_group_schema().items():
+        if exposed.get(group) and all(name in dropped for name in exposed[group]):
+            continue
+        fields = [f for f in spec["fields"]
+                  if sub_field_of.get((group, f["field"])) not in dropped]
+        if not fields:
+            continue
+        kept[group] = {**spec, "fields": fields}
+    return kept
+
+
 def build_chat_payload(prompt, model, images, json_mode, schema=None):
     """The /api/chat body for one call.
 
@@ -816,12 +918,17 @@ def grounding_is_cheap(has_text_layer):
     return bool(has_text_layer)
 
 
-def extract_vision_only(pdf_path, model=LLM_MODEL, return_meta=False, max_parse_retries=2):
+def extract_vision_only(pdf_path, model=LLM_MODEL, return_meta=False, max_parse_retries=2, exclude=()):
     """Ungrounded extraction: image(s) + schema, one call, no OCR anywhere in
     the path. Mirrors extract_vision_grounded's retry-on-unparseable-JSON so a
-    call-level fluke isn't scored as an accuracy difference between them."""
+    call-level fluke isn't scored as an accuracy difference between them.
+
+    `exclude` names flattened fields the caller doesn't want; they are gone
+    from the prompt entirely rather than filtered out of the answer, which is
+    the whole point - an unasked field costs no tokens and no time."""
+    group_schema = group_schema_for(exclude)
     images_b64 = render_pdf_to_base64_images(pdf_path)
-    prompt = build_vision_only_prompt(get_field_schema(), get_group_schema(), len(images_b64))
+    prompt = build_vision_only_prompt(field_schema_for(exclude), group_schema, len(images_b64))
 
     last_error = None
     for attempt in range(max_parse_retries + 1):
@@ -841,7 +948,7 @@ def extract_vision_only(pdf_path, model=LLM_MODEL, return_meta=False, max_parse_
     groups_raw = parsed.get("groups", {}) if isinstance(parsed, dict) else {}
     groups = {
         name: _unwrap_group_array(groups_raw.get(name), spec)
-        for name, spec in get_group_schema().items()
+        for name, spec in group_schema.items()
     }
     extracted = {"fields": fields, "groups": groups}
     return (extracted, meta) if return_meta else extracted
@@ -850,7 +957,7 @@ def extract_vision_only(pdf_path, model=LLM_MODEL, return_meta=False, max_parse_
 SCHEMA_MODES = ("prompt", "pydantic")
 
 
-def _format_schema(schema_mode):
+def _format_schema(schema_mode, exclude=()):
     """The JSON Schema to constrain generation with, or None for the original
     prompt-only behaviour.
 
@@ -862,10 +969,14 @@ def _format_schema(schema_mode):
     if schema_mode != "pydantic":
         return None
     import schema_models
-    return schema_models.extraction_json_schema()
+    # The same filtered schema the prompt was built from. Constraining
+    # generation to the FULL one would put every excluded field back as a
+    # key the model is obliged to fill.
+    return schema_models.extraction_json_schema(
+        fields=field_schema_for(exclude), groups=group_schema_for(exclude))
 
 
-def extract_vision_grounded(pdf_path, model=LLM_MODEL, ocr_df=None, return_meta=False, max_parse_retries=2, schema_mode="prompt"):
+def extract_vision_grounded(pdf_path, model=LLM_MODEL, ocr_df=None, return_meta=False, max_parse_retries=2, schema_mode="prompt", exclude=()):
     """Vision-primary extraction: sends the page image(s) plus OCR text
     (as grounding context, not a replacement) in a single call, covering
     both get_field_schema() and get_group_schema() at once. Returns
@@ -877,12 +988,16 @@ def extract_vision_grounded(pdf_path, model=LLM_MODEL, ocr_df=None, return_meta=
     failure modes (trailing "extra data" after valid JSON, and once a
     genuinely empty response body) - both are call-level flukes, not
     something a differently-worded prompt would fix, so a fresh retry is
-    the right response rather than surfacing a crash."""
+    the right response rather than surfacing a crash.
+
+    `exclude` names flattened fields to leave out; they never enter the
+    prompt or the constrained schema."""
     if ocr_df is None:
         ocr_df = ocr_to_dataframe(pdf_path)
+    group_schema = group_schema_for(exclude)
     images_b64 = render_pdf_to_base64_images(pdf_path)
-    prompt = build_vision_grounded_prompt(get_field_schema(), get_group_schema(), ocr_df, len(images_b64))
-    schema = _format_schema(schema_mode)
+    prompt = build_vision_grounded_prompt(field_schema_for(exclude), group_schema, ocr_df, len(images_b64))
+    schema = _format_schema(schema_mode, exclude)
 
     last_error = None
     for attempt in range(max_parse_retries + 1):
@@ -903,7 +1018,7 @@ def extract_vision_grounded(pdf_path, model=LLM_MODEL, ocr_df=None, return_meta=
     groups_raw = parsed.get("groups", {}) if isinstance(parsed, dict) else {}
     groups = {
         name: _unwrap_group_array(groups_raw.get(name), spec)
-        for name, spec in get_group_schema().items()
+        for name, spec in group_schema.items()
     }
     extracted = {"fields": fields, "groups": groups}
     return (extracted, meta) if return_meta else extracted
@@ -916,8 +1031,9 @@ CHOICE_FIELD_TARGETS = {
 }
 
 
-def choice_candidates():
-    """{group sub-field name: its option list} for every choice field.
+def choice_candidates(exclude=()):
+    """{group sub-field name: its option list} for every choice field still
+    being extracted.
 
     Published in run()'s output so the UI can locate a choice field's printed
     option line on the page the same way mark_detector does - by finding the
@@ -930,14 +1046,15 @@ def choice_candidates():
         field["field"]: field
         for spec in get_group_schema().values() for field in spec["fields"]
     }
+    dropped = _excluded_names(exclude)
     return {
         sub_field: by_name[sub_field]["candidates"]
-        for sub_field in CHOICE_FIELD_TARGETS
-        if (by_name.get(sub_field) or {}).get("candidates")
+        for sub_field, target in CHOICE_FIELD_TARGETS.items()
+        if target not in dropped and (by_name.get(sub_field) or {}).get("candidates")
     }
 
 
-def resolve_choice_fields_geometrically(pdf_path, ocr_df=None):
+def resolve_choice_fields_geometrically(pdf_path, ocr_df=None, exclude=()):
     """Resolves the "pick one of N" choice fields by reading the page's
     geometry instead of trusting the vision-LLM, which is unreliable on
     these two regardless of prompting - refinement #1 in RECOMMENDATION.md
@@ -956,7 +1073,9 @@ def resolve_choice_fields_geometrically(pdf_path, ocr_df=None):
     ambiguous read. Abstaining rather than forcing an answer is deliberate:
     a wrong deterministic value is worse than deferring to the LLM.
     """
-    overrides = {target: None for target in CHOICE_FIELD_TARGETS.values()}
+    dropped = _excluded_names(exclude)
+    overrides = {target: None for target in CHOICE_FIELD_TARGETS.values()
+                 if target not in dropped}
     by_name = {
         field["field"]: field
         for spec in get_group_schema().values() for field in spec["fields"]
@@ -967,7 +1086,10 @@ def resolve_choice_fields_geometrically(pdf_path, ocr_df=None):
 
     for sub_field, target in CHOICE_FIELD_TARGETS.items():
         candidates = (by_name.get(sub_field) or {}).get("candidates")
-        if not candidates:
+        # An excluded field skips the detector entirely: this is a page-scale
+        # pixel/vector read, so not running it is real time saved, not just a
+        # value discarded.
+        if not candidates or target in dropped:
             continue
         try:
             if native:
@@ -1026,7 +1148,7 @@ def _resolve_choice_raster(pdf_path, ocr_df, candidates, dpi=150):
     return answer or ring_pick
 
 
-def run(pdf_path, model=LLM_MODEL, grounded=True, schema_mode="prompt"):
+def run(pdf_path, model=LLM_MODEL, grounded=True, schema_mode="prompt", exclude=()):
     """Runs the vision-primary + OCR-grounding extraction
     (extract_vision_grounded) and flattens the nested {fields, groups}
     result into a single flat "fields" dict, using the SAME field names
@@ -1040,6 +1162,13 @@ def run(pdf_path, model=LLM_MODEL, grounded=True, schema_mode="prompt"):
     full per-occurrence detail (designation, signature date, and which
     value came from which party) stays in raw["groups"] via
     extract_vision_grounded() directly, and is kept here too under "_raw".
+
+    `exclude` is a list of flattened field names to leave out, as published
+    by field_sources() - the UI's field picker passes whatever the user
+    unticked. Excluded means excluded everywhere: out of the prompt, out of
+    the constrained schema, out of the geometric choice-field pass, and out
+    of the flat result. It can only ever narrow the schema; there is no way
+    to add a field this way.
 
     grounded=False drops the text pass entirely and extracts from the image
     alone (extract_vision_only). Note "the text pass" is not always OCR:
@@ -1065,63 +1194,71 @@ def run(pdf_path, model=LLM_MODEL, grounded=True, schema_mode="prompt"):
     always None (this schema is universal like vllm's, not per-template
     like bbox-ocr-extractor's, so no classification needed)."""
     if not grounded:
-        return _run_ungrounded(pdf_path, model=model)
+        return _run_ungrounded(pdf_path, model=model, exclude=exclude)
     ocr_df = ocr_to_dataframe(pdf_path)
     raw, meta = extract_vision_grounded(pdf_path, model=model, ocr_df=ocr_df,
-                                        return_meta=True, schema_mode=schema_mode)
+                                        return_meta=True, schema_mode=schema_mode,
+                                        exclude=exclude)
 
-    fields = flatten_fields(raw)
+    fields = flatten_fields(raw, exclude=exclude)
 
     # Override the LLM's own read of the choice fields with the geometric
     # detector - see resolve_choice_fields_geometrically's docstring for why,
     # and note it abstains (leaving the LLM's answer) rather than guessing.
-    choice_overrides = resolve_choice_fields_geometrically(pdf_path, ocr_df=ocr_df)
+    choice_overrides = resolve_choice_fields_geometrically(pdf_path, ocr_df=ocr_df,
+                                                           exclude=exclude)
     for field_name, override_value in choice_overrides.items():
         if override_value is not None:
             fields[field_name] = override_value
     raw["_choice_field_overrides"] = choice_overrides
     # So the UI can box a choice field by its printed option line rather than
     # by the selected word alone - see boxes.find_choice_line.
-    raw["_choice_candidates"] = choice_candidates()
+    raw["_choice_candidates"] = choice_candidates(exclude)
 
     return {
         "fields": fields, "template": None, "_raw": raw, "_meta": meta,
         "grounded": True,
+        "excluded": list(_excluded_names(exclude)),
         "_ocr_boxes": get_ocr_boxes_normalized(pdf_path, ocr_df=ocr_df),
     }
 
 
-def flatten_fields(raw):
+def flatten_fields(raw, exclude=()):
     """Collapses extract_vision_grounded/extract_vision_only's nested
     {fields, groups} into the single flat dict the UI and the ground-truth
     comparison expect. Shared by both arms so the toggle can only change
-    WHERE the values came from, never how they are named or joined."""
+    WHERE the values came from, never how they are named or joined.
+
+    The group-to-flat mapping is FLAT_FROM_GROUPS rather than a list written
+    out here, so field_sources() (what the picker offers) and this (what the
+    result holds) cannot disagree about a name.
+
+    `exclude` drops those names from the output. They should already be
+    absent - nothing asked for them - but a model can echo a key it was never
+    given, and one that slipped through would render a row the user switched
+    off."""
+    dropped = _excluded_names(exclude)
+    multiple = {name: spec["multiple"] for name, spec in get_group_schema().items()}
+
     def value_of(d, key):
         return _safe_leaf((d or {}).get(key)).get("value")
 
     def joined(group_name, sub_field):
         return join_occurrences(raw["groups"].get(group_name), sub_field)
 
-    fields = {name: value_of(raw["fields"], name) for name in raw["fields"]}
+    fields = {name: value_of(raw["fields"], name)
+              for name in raw["fields"] if name not in dropped}
 
-    property_fields = raw["groups"].get("property") or {}
-    fields["Description of Property/Property Type"] = value_of(property_fields, "Description/Property Type")
-    fields["Property Address"] = value_of(property_fields, "Address")
-    fields["Title Details"] = value_of(property_fields, "Title Details")
-    fields["Premise Usage"] = value_of(property_fields, "Usage")
-    fields["Furnished Status"] = value_of(property_fields, "Furnished Status")
-
-    # Every party on the form, not just the first - see join_occurrences.
-    fields["Landlord Name(s)"] = joined("landlord", "Name")
-    fields["Landlord NRIC/Passport No."] = joined("landlord", "NRIC/Passport No.")
-
-    fields["Tenant Name(s)/Company"] = joined("tenant", "Name/Company")
-    fields["Tenant NRIC/Passport No."] = joined("tenant", "NRIC/Passport No.")
-    fields["Tenant Address"] = joined("tenant", "Address")
-
-    fields["Negotiator/Agent Name"] = joined("agent", "Name")
-
-    fields["Witnessed by"] = joined("witness", "Name")
+    # Every party on the form, not just the first - see join_occurrences,
+    # which is why a repeatable role joins while a single-object group (the
+    # property) reads one value.
+    for flat_name, group, sub_field in FLAT_FROM_GROUPS:
+        if flat_name in dropped:
+            continue
+        if multiple.get(group):
+            fields[flat_name] = joined(group, sub_field)
+        else:
+            fields[flat_name] = value_of(raw["groups"].get(group) or {}, sub_field)
 
     # "" rather than None for a genuinely-absent field, matching the other
     # two extractors' output convention (app.py's lookup_extracted does
@@ -1130,7 +1267,7 @@ def flatten_fields(raw):
     return {k: ("" if v is None else v) for k, v in fields.items()}
 
 
-def _run_ungrounded(pdf_path, model=LLM_MODEL):
+def _run_ungrounded(pdf_path, model=LLM_MODEL, exclude=()):
     """run()'s grounded=False path: one vision call, no OCR anywhere.
 
     Two things are deliberately absent rather than faked. "_ocr_boxes" is
@@ -1140,24 +1277,28 @@ def _run_ungrounded(pdf_path, model=LLM_MODEL):
     which reads the PDF's own vector strikethrough and needs no OCR; on a
     scan it would need an OCR pass, which is the very cost this arm exists to
     avoid, so the LLM's own read stands."""
-    raw, meta = extract_vision_only(pdf_path, model=model, return_meta=True)
-    fields = flatten_fields(raw)
+    raw, meta = extract_vision_only(pdf_path, model=model, return_meta=True,
+                                    exclude=exclude)
+    fields = flatten_fields(raw, exclude=exclude)
 
     with fitz.open(pdf_path) as pdf:
         native = len(pdf[0].get_text().strip()) > 100
 
-    choice_overrides = {target: None for target in CHOICE_FIELD_TARGETS.values()}
+    dropped = _excluded_names(exclude)
+    choice_overrides = {target: None for target in CHOICE_FIELD_TARGETS.values()
+                        if target not in dropped}
     if native:
-        choice_overrides = resolve_choice_fields_geometrically(pdf_path)
+        choice_overrides = resolve_choice_fields_geometrically(pdf_path, exclude=exclude)
         for field_name, override_value in choice_overrides.items():
             if override_value is not None:
                 fields[field_name] = override_value
     raw["_choice_field_overrides"] = choice_overrides
-    raw["_choice_candidates"] = choice_candidates()
+    raw["_choice_candidates"] = choice_candidates(exclude)
 
     return {
         "fields": fields, "template": None, "_raw": raw, "_meta": meta,
         "grounded": False,
+        "excluded": list(dropped),
         # Kept when they are free to obtain - see ungrounded_box_lines. The
         # toggle skips the text in the PROMPT, not the boxes, so a digital
         # form still shows where every value came from.
@@ -1171,7 +1312,21 @@ def main():
                      "text supplied as grounding context in the same call "
                      "(see extract_vision_grounded) rather than OCR-text-only."
     )
-    parser.add_argument("--pdf", required=True, help="Path to the PDF to extract.")
+    # Not required=True: --list-fields is a question about the schema, and
+    # answering it must not depend on having a document to hand. Checked
+    # below instead, once we know an extraction is actually being asked for.
+    parser.add_argument("--pdf", help="Path to the PDF to extract.")
+    parser.add_argument("--list-fields", action="store_true",
+                        help="Print the extractable field names as a JSON array on "
+                             "stdout and exit. This is what the UI's field picker is "
+                             "built from, so the schema stays the one place a field "
+                             "is defined.")
+    parser.add_argument("--exclude", action="append", default=[], metavar="FIELD",
+                        help="A field to leave out, by its name from --list-fields. "
+                             "Repeatable. Excluded fields never enter the prompt, so "
+                             "this saves tokens and time as well as hiding a column. "
+                             "Subtractive only - there is no matching way to add a "
+                             "field that isn't in the schema.")
     parser.add_argument("--model", default=LLM_MODEL,
                         help=f"Ollama model to use (default: {LLM_MODEL}). Must be vision-capable.")
     parser.add_argument("--output-dir", default=str(Path(__file__).parent / "output"),
@@ -1190,6 +1345,20 @@ def main():
                              "milliseconds.")
     args = parser.parse_args()
 
+    if args.list_fields:
+        json.dump(selectable_fields(), sys.stdout)
+        sys.stdout.write("\n")
+        return
+    if not args.pdf:
+        parser.error("--pdf is required (except with --list-fields)")
+
+    unknown = [name for name in args.exclude if name not in field_sources()]
+    if unknown:
+        parser.error("unknown field(s) to --exclude: " + ", ".join(repr(n) for n in unknown)
+                     + "\nRun --list-fields to see the valid names.")
+    if len(args.exclude) >= len(field_sources()):
+        parser.error("every field was excluded - there would be nothing to extract.")
+
     pdf_paths = [args.pdf]
 
     output_dir = Path(args.output_dir)
@@ -1199,7 +1368,7 @@ def main():
         print(f"\n=== {pdf_path} ===", file=sys.stderr)
         start = time.monotonic()
         result = run(pdf_path, model=args.model, grounded=not args.no_grounding,
-                     schema_mode=args.schema_mode)
+                     schema_mode=args.schema_mode, exclude=args.exclude)
         elapsed = time.monotonic() - start
         print(f"Time taken: {elapsed:.1f}s", file=sys.stderr)
 
