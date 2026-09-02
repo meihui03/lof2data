@@ -47,6 +47,26 @@ actual vector strikethrough for the native-text template) and
 `detect_circled_choice()` (OpenCV circle detection for the scanned
 template).
 
+### Field descriptions name a role, not a label
+
+A description is the only thing telling the model what a field IS, so it has
+to survive a template it has never seen - the same constraint the box design
+and the choice-field detector are held to. The agent group failed that test:
+it required a name to be "printed next to an 'Attn:'/'Negotiator(s):' label",
+which is a convention of the templates seen so far, not a definition of the
+role. A form labelling the same person "Agent:" or "Marketed by:" would have
+returned nothing, and the failure is silent - an empty field looks exactly
+like a form that genuinely has no negotiator.
+
+It now describes the role (the agency's representative on the deal, as
+opposed to a party to the tenancy) and offers the labels as examples. The
+guard that motivated the original wording is kept, because it came from a
+real misattribution: a landlord, tenant, or witness name must not be promoted
+into this role just because it appears on the page. Note the negotiator often
+signs as the witness as well; that is handled downstream by the comparison
+row accepting either (see the picker's paired fields), not by loosening what
+a negotiator is.
+
 ## OCR engine: classic PaddleOCR, not PaddleOCR-VL
 
 `engine/extractor.py` uses the
@@ -121,10 +141,37 @@ render scale, a label sitting above its wash lands on the line above's text.
 
 A badge collides with neither. It is small, it sits in the margin the form
 already leaves, and fields sharing a line share one badge whose legend entry
-lists both names — which is the true statement anyway: this line is where both
+lists their names — which is the true statement anyway: this line is where both
 were read from. The badge falls to the right of the wash for a clause printed
 hard against the left edge, since a line's tail is nearly always blank while
 its head is the text being pointed at.
+
+A field is named in the legend the way the comparison table names it. Boxes
+are found in two passes - one over the model's raw reply, which nests a party
+under its group (`agent`/`Name`), and one over the flattened fields the table
+shows (`Negotiator/Agent Name`) - and both land on the same line, so the
+legend printed one line twice under two names for one field. The engine
+publishes its own `field_sources()` mapping in the result (beside
+`_choice_candidates`, and for the same reason: the UI needs the schema's
+mapping and must not keep a second copy to drift). A sub-field with no
+flattened name - a party's designation or signature date, extracted and boxed
+but never shown in the table - is written out as words instead of the raw
+path.
+
+Only fields the reader can act on are drawn. A group can carry a sub-field the
+UI has no other trace of — a witness's NRIC, extracted so the model can tell
+one signature block from another, offered by no checkbox and shown in no row.
+Highlighting it numbered a region in the legend for something nobody asked for
+and nothing can switch off, so a sub-field is now drawn only when it feeds a
+flattened field.
+
+A party's **designation and signature date** were in that same position and
+have been removed from the schema outright rather than merely hidden. They
+cost prompt tokens on every run — the binding constraint on the local model —
+to produce four values no picker offered, no row showed, and nothing scored.
+Note what this gives up: they were plausibly helping the model keep a company
+signatory apart from the company itself, so if the tenant group starts
+merging those two, this is the first change to suspect.
 
 Note the regions are still **line-level**: `ocr_to_dataframe` emits one row per
 recognized line, so a wash covers the line a value sits on rather than the

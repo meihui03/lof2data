@@ -51,10 +51,23 @@ class TestFieldSources(unittest.TestCase):
                          ("group", "property", "Address"))
 
     def test_sub_fields_that_never_reach_the_flat_output_are_not_offered(self):
-        # A landlord's designation and signature date stay in _raw for the
-        # box overlay; no table shows them, so no picker should either.
-        self.assertNotIn("Designation (if any)", E.field_sources())
-        self.assertNotIn("Signature Date", E.field_sources())
+        # A witness's NRIC is asked for so the model can tell one signature
+        # block from another, but no table shows it - so no picker offers it,
+        # under that name or a flattened one.
+        self.assertNotIn("NRIC/Passport No.", E.field_sources())
+        self.assertNotIn("Witness NRIC/Passport No.", E.field_sources())
+
+    def test_both_parties_offer_the_same_shape(self):
+        # A landlord and a tenant are both parties to the same document; a
+        # field one side publishes and the other doesn't is nearly always an
+        # oversight rather than a decision (this is how Landlord Address came
+        # to be missing while Tenant Address was there).
+        offered = E.field_sources()
+        for field in ("Name", "NRIC/Passport No.", "Address"):
+            landlord = [f for f in offered if f.startswith("Landlord") and field.split("/")[0] in f]
+            tenant = [f for f in offered if f.startswith("Tenant") and field.split("/")[0] in f]
+            self.assertTrue(landlord, f"no landlord field for {field}")
+            self.assertTrue(tenant, f"no tenant field for {field}")
 
     def test_selectable_fields_is_the_published_order(self):
         self.assertEqual(E.selectable_fields(), list(E.field_sources()))
@@ -93,16 +106,25 @@ class TestGroupSchemaFor(unittest.TestCase):
         self.assertIn("landlord", kept)
 
     def test_the_group_goes_when_every_offered_field_is_excluded(self):
-        # Asking for a landlord object whose name and NRIC are both switched
+        # Asking for a landlord object whose every offered field is switched
         # off would spend prompt tokens on an answer nothing reads.
-        kept = E.group_schema_for(["Landlord Name(s)", "Landlord NRIC/Passport No."])
+        #
+        # The list is derived, not written out: spelled literally, this test
+        # silently stopped testing anything the day a third landlord field was
+        # added - it excluded two of three and passed for the wrong reason.
+        landlord = [flat for flat, group, _ in E.FLAT_FROM_GROUPS if group == "landlord"]
+        kept = E.group_schema_for(landlord)
         self.assertNotIn("landlord", kept)
         self.assertIn("tenant", kept)
 
     def test_unoffered_sub_fields_ride_along_with_a_surviving_group(self):
-        fields = [f["field"] for f in E.group_schema_for(["Landlord Name(s)"])["landlord"]["fields"]]
-        self.assertNotIn("Name", fields)
-        self.assertIn("Designation (if any)", fields)
+        kept = E.group_schema_for(["Landlord Name(s)"])
+        landlord = [f["field"] for f in kept["landlord"]["fields"]]
+        self.assertNotIn("Name", landlord)
+        # A witness's NRIC is offered by no picker, so nothing can exclude it:
+        # it stays for exactly as long as its group does.
+        witness = [f["field"] for f in kept["witness"]["fields"]]
+        self.assertIn("NRIC/Passport No.", witness)
 
     def test_the_group_keeps_its_description_and_multiple_flag(self):
         kept = E.group_schema_for(["Tenant Address"])["tenant"]

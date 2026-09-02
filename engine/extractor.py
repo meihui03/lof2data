@@ -198,40 +198,36 @@ def get_group_schema():
             ],
         },
         "landlord": {
-            "description": "Each landlord/lessor named on the form - there can genuinely be more than one co-landlord, each with their own name/NRIC, and each should be its own occurrence. Do NOT include the witness who signed 'Witnessed by' / 'Signed in the presence of:' next to the landlord's signature block - a witness is a separate role (see the 'witness' group) even if physically close to the landlord's block, or the same person who negotiated the deal.",
+            "description": "Each landlord/lessor named on the form - there can genuinely be more than one co-landlord, each with their own name/NRIC, and each should be its own occurrence. Do NOT include anyone signing as a WITNESS to that signature - a witness is a separate role (see the 'witness' group) even when their name sits inside or beside this block, and even when it is the same person who negotiated the deal. Templates label a witness block in different ways, so judge it by the role the person is playing, not by the wording used.",
             "multiple": True,
             "fields": [
                 {"field": "Name", "description": "The landlord's full name.", "type": "text"},
                 {"field": "NRIC/Passport No.", "description": "For an individual landlord, their NRIC or passport number. For a COMPANY landlord, this is that company's own registration number - NOT a company stamp's reference number, and NOT a signatory's personal ID.", "type": "text"},
-                {"field": "Designation (if any)", "description": "The landlord's designation/title if signing on behalf of a company (e.g. 'Director', 'Owner').", "type": "text"},
-                {"field": "Signature Date", "description": "The date the landlord signed, if shown.", "type": "text"},
+                {"field": "Address", "description": "The landlord's mailing/registered address, if printed on the form. This is the landlord's OWN address - do NOT fill it with the address of the property being rented, which belongs to the property group and is usually printed far more prominently.", "type": "text"},
             ],
         },
         "tenant": {
-            "description": "Each tenant named on the form - a company tenant AND its individual signatory both count as separate occurrences, as do multiple co-tenants, so there can genuinely be more than one. Do NOT include the witness who signed 'Witnessed by' / 'Signed in the presence of:' next to the tenant's signature block - a witness is a separate role (see the 'witness' group) even if physically close to the tenant's block, or the same person who negotiated the deal.",
+            "description": "Each tenant named on the form - a company tenant AND its individual signatory both count as separate occurrences, as do multiple co-tenants, so there can genuinely be more than one. Do NOT include anyone signing as a WITNESS to that signature - a witness is a separate role (see the 'witness' group) even when their name sits inside or beside this block, and even when it is the same person who negotiated the deal. Templates label a witness block in different ways, so judge it by the role the person is playing, not by the wording used.",
             "multiple": True,
             "fields": [
                 {"field": "Name/Company", "description": "The tenant's full name, or company name and registration number if a company.", "type": "text"},
                 {"field": "NRIC/Passport No.", "description": "For an individual tenant, their NRIC or passport number. For a COMPANY tenant, this is that company's own registration number (e.g. '1626300-V', usually printed right after the company name in parentheses) - NOT a company stamp's reference number, and NOT a signatory's personal ID (that belongs on the signatory's own separate occurrence instead).", "type": "text"},
                 {"field": "Address", "description": "The tenant's mailing/registered address, if printed on the form.", "type": "text"},
-                {"field": "Designation (if any)", "description": "The tenant's designation/title if signing on behalf of a company (e.g. 'Director').", "type": "text"},
-                {"field": "Signature Date", "description": "The date the tenant signed, if shown.", "type": "text"},
             ],
         },
         "agent": {
-            "description": "The PropNex negotiator(s)/agent(s) handling this deal, printed after an explicit 'Attn:' or 'Negotiator(s):' label near the top of the form. Usually just one, but more than one is possible. If the form has NO such label at all, return an empty array [] - do NOT fill this with a landlord's, tenant's, or witness's name just because a name is present elsewhere on the page. A name only belongs here if it is genuinely printed next to an 'Attn:'/'Negotiator(s):' label.",
+            "description": "The estate agent / negotiator representing the agency on this deal - the person the form is addressed to or handled by, usually named near the top. Identify this by ROLE, not by a particular wording: the label varies between templates ('Attn:', 'Negotiator(s):', 'Agent:', 'Salesperson:', 'Marketed by:', or a name set in the agency's letterhead block), and an unfamiliar label naming someone in that role still counts. What makes a name belong here is that it is presented as the agency's representative rather than as a party to the tenancy. Usually just one, but more than one is possible. Do NOT put a landlord, tenant, or witness here merely because their name appears elsewhere on the page - those are separate roles with their own groups, and the same individual often signs as a witness too, which does not make a witness-only name a negotiator. If no name on the form is presented in an agency/negotiator role at all, return an empty array [].",
             "multiple": True,
             "fields": [
                 {"field": "Name", "description": "The negotiator/agent's name.", "type": "text"},
             ],
         },
         "witness": {
-            "description": "Each witness who signed 'Witnessed by' / 'Signed in the presence of:' on a signature block - the tenant's and landlord's witness may be the same person or different people, and there can be more than one.",
+            "description": "Each person who signed as a WITNESS to someone else's signature - attesting a signature rather than being a party to the tenancy. Identify this by ROLE, not by a particular wording: templates label the block differently ('Witnessed by', 'Signed in the presence of:', 'In the presence of', a bare 'Witness', or the Malay 'Saksi'), and an unfamiliar label over a signature naming a witness still counts. The tenant's and the landlord's witness may be the same person or different people, and there can be more than one.",
             "multiple": True,
             "fields": [
                 {"field": "Name", "description": "The witness's name.", "type": "text"},
                 {"field": "NRIC/Passport No.", "description": "The witness's NRIC or passport number, if shown.", "type": "text"},
-                {"field": "Signature Date", "description": "The date the witness signed, if shown.", "type": "text"},
             ],
         },
     }
@@ -268,6 +264,7 @@ FLAT_FROM_GROUPS = (
     ("Furnished Status", "property", "Furnished Status"),
     ("Landlord Name(s)", "landlord", "Name"),
     ("Landlord NRIC/Passport No.", "landlord", "NRIC/Passport No."),
+    ("Landlord Address", "landlord", "Address"),
     ("Tenant Name(s)/Company", "tenant", "Name/Company"),
     ("Tenant NRIC/Passport No.", "tenant", "NRIC/Passport No."),
     ("Tenant Address", "tenant", "Address"),
@@ -285,9 +282,9 @@ def field_sources():
     list of its own, so a field added to the schema becomes pickable with no
     second edit, and one removed stops being offered.
 
-    Note the group sub-fields NOT listed here (a party's designation, a
-    signature date) are deliberately absent: they never reach the flat output,
-    so there is nothing for a picker to show or a table to hide.
+    Note a group sub-field NOT listed here (a witness's NRIC) is deliberately
+    absent: it never reaches the flat output, so there is nothing for a picker
+    to show or a table to hide.
     """
     sources = {f["field"]: ("field", f["field"]) for f in get_field_schema()}
     for flat_name, group, sub_field in FLAT_FROM_GROUPS:
@@ -322,9 +319,9 @@ def group_schema_for(exclude=()):
     A group's sub-field is dropped when the flat name it feeds is excluded,
     and the whole group goes when every flat name it feeds has gone - asking
     for a landlord object whose name and NRIC are both switched off would burn
-    prompt tokens on an answer nothing downstream reads. Sub-fields that feed
-    no flat name (designation, signature date) ride along with their group,
-    since no picker offers them and no table shows them.
+    prompt tokens on an answer nothing downstream reads. A sub-field that
+    feeds no flat name (a witness's NRIC) rides along with its group, since no
+    picker offers it and no table shows it.
 
     Known artifact, accepted: the landlord and tenant descriptions tell the
     model not to file a witness under them, "see the 'witness' group" - and
@@ -697,7 +694,7 @@ def extract_groups_from_ocr(pdf_path, model=LLM_MODEL, ocr_df=None):
     GROUP rather than one big batched call: "multiple" groups need a
     different JSON shape (array) than "property" (object), and landlord's
     and tenant's sub-fields use near-identical names (Name, NRIC/Passport
-    No., Signature Date) - batching them together was confirmed (twice) to
+    No.) - batching them together was confirmed (twice) to
     cause cross-field mix-ups and lower accuracy overall, on top of being
     ~3x slower in wall-clock time despite being fewer round-trips. Returns
     {group_name: object or list, matching get_group_schema()'s "multiple"
@@ -1159,9 +1156,14 @@ def run(pdf_path, model=LLM_MODEL, grounded=True, schema_mode="prompt", exclude=
     (landlord/tenant/agent/witness) is flattened into its field, joined
     with " / " - see join_occurrences, and note that's the same separator
     api_ground_truth.py builds its own multi-party ground truth with. The
-    full per-occurrence detail (designation, signature date, and which
-    value came from which party) stays in raw["groups"] via
-    extract_vision_grounded() directly, and is kept here too under "_raw".
+    full per-occurrence detail (which value came from which party, and a
+    witness's NRIC) stays in raw["groups"] via extract_vision_grounded()
+    directly, and is kept here too under "_raw".
+
+    A party's designation and signature date used to be extracted alongside
+    the rest and were removed: no picker offered them, no row showed them, and
+    the only place they surfaced was the page overlay, where they highlighted
+    and numbered a line nobody had asked about.
 
     `exclude` is a list of flattened field names to leave out, as published
     by field_sources() - the UI's field picker passes whatever the user
@@ -1214,6 +1216,10 @@ def run(pdf_path, model=LLM_MODEL, grounded=True, schema_mode="prompt", exclude=
     # So the UI can box a choice field by its printed option line rather than
     # by the selected word alone - see boxes.find_choice_line.
     raw["_choice_candidates"] = choice_candidates(exclude)
+    # So the UI can name a raw group sub-field the way the table names it
+    # ("agent"/"Name" -> "Negotiator/Agent Name") instead of restating the
+    # mapping over there, where it would drift from this one.
+    raw["_field_sources"] = field_sources()
 
     return {
         "fields": fields, "template": None, "_raw": raw, "_meta": meta,
@@ -1294,6 +1300,7 @@ def _run_ungrounded(pdf_path, model=LLM_MODEL, exclude=()):
                 fields[field_name] = override_value
     raw["_choice_field_overrides"] = choice_overrides
     raw["_choice_candidates"] = choice_candidates(exclude)
+    raw["_field_sources"] = field_sources()
 
     return {
         "fields": fields, "template": None, "_raw": raw, "_meta": meta,

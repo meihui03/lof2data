@@ -48,6 +48,7 @@ engine/    extraction — OCR, prompting, choice-field detection
 | `app/fields.py` | groups the engine's field list for the picker, and hides a removed field's row |
 | `app/models.py` | which models are offerable, and cloud rate-limit gating |
 | `app/boxes.py` | turns an LLM `source_index` citation into the region to highlight, and locates one by text when there's no citation |
+| `app/table.py` | the comparison table's markup — hand-built so a long value is never clipped |
 | `app/groundtruth.py` | fetches the CRM record and matches values against it |
 | `engine/extractor.py` | OCR, prompt building, extraction, flattening |
 | `engine/mark_detector.py` | template-free reader for circled/struck choices |
@@ -177,6 +178,7 @@ app/.venv/bin/python3 app/test_boxes.py
 app/.venv/bin/python3 app/test_models.py
 app/.venv/bin/python3 app/test_groundtruth.py
 app/.venv/bin/python3 app/test_fields.py
+app/.venv/bin/python3 app/test_table.py
 app/.venv/bin/python3 app/test_app_ui.py
 engine/.venv/bin/python3 engine/test_extractor_flatten.py
 engine/.venv/bin/python3 engine/test_schema_models.py

@@ -25,7 +25,7 @@ FIELD_SECTIONS = [
         "Earnest Deposit Amount", "Legal Cost / Stamp Duty Allocation",
     ]),
     ("Parties", [
-        "Landlord Name(s)", "Landlord NRIC/Passport No.",
+        "Landlord Name(s)", "Landlord NRIC/Passport No.", "Landlord Address",
         "Tenant Name(s)/Company", "Tenant NRIC/Passport No.",
         "Tenant Address", "Negotiator/Agent Name", "Witnessed by",
     ]),
@@ -67,6 +67,88 @@ def excluded_from(all_fields, keep_flags):
     yet, and defaulting the other way would silently extract nothing.
     """
     return [name for name in all_fields if not keep_flags.get(name, True)]
+
+
+def picker_units(all_fields, alias_groups):
+    """[(key, label, [field, ...]), ...] - what Step 2 offers as ONE tick.
+
+    Most fields are their own unit. Fields that answer the SAME comparison
+    row are one unit, because ticking one and not the other is never what
+    someone means and quietly costs them the row.
+
+    That is not hypothetical. "Attn: Negotiator(s) / Witness" is answered by
+    the negotiator OR the witness, precisely because a form that carries no
+    "Attn:" line still names the same person under "Witnessed by" - the
+    extractor is told to return no agent rather than promote a witness into
+    the role. On a document like that, keeping "Negotiator/Agent Name" while
+    dropping "Witnessed by" left the row empty and scored it as a miss, when
+    the answer was on the page and the pipeline was simply told not to read
+    it. One tick for both makes that unreachable.
+
+    `alias_groups` is the caller's alias map values (app.py's VLLM_ALIASES) -
+    passed in rather than imported, since importing app.py runs the whole
+    Streamlit script. Names in a group that the engine doesn't offer (a
+    sibling extractor's "Purchaser Name(s)") are ignored, so they neither
+    form nor grow a unit.
+    """
+    available = list(all_fields)
+    order = {name: i for i, name in enumerate(available)}
+
+    # field -> the full membership of its unit
+    unit_of = {}
+    for group in alias_groups or ():
+        members = tuple(sorted({n for n in group if n in order}, key=order.get))
+        if len(members) > 1:
+            for name in members:
+                # A field named in two alias groups keeps the first grouping
+                # it was given, rather than silently merging three fields
+                # into one tick.
+                unit_of.setdefault(name, members)
+
+    units, placed = [], set()
+    for name in available:
+        if name in placed:
+            continue
+        members = unit_of.get(name, (name,))
+        placed.update(members)
+        units.append((members[0], " · ".join(members), list(members)))
+    return units
+
+
+def sectioned_units(all_fields, alias_groups):
+    """picker_units(), grouped into sections the way sectioned_fields groups
+    plain names. A unit lands in the section of whichever member the sections
+    mention first, and appears exactly once even if its members are listed in
+    different sections."""
+    units = picker_units(all_fields, alias_groups)
+    unit_by_member = {member: unit for unit in units for member in unit[2]}
+
+    grouped, placed = [], set()
+    for title, names in sectioned_fields(all_fields):
+        section = []
+        for name in names:
+            unit = unit_by_member.get(name)
+            if unit is None or unit[0] in placed:
+                continue
+            placed.add(unit[0])
+            section.append(unit)
+        if section:
+            grouped.append((title, section))
+    return grouped
+
+
+def excluded_from_units(all_fields, units, keep_flags):
+    """The fields to pass to the engine as --exclude, given one flag per UNIT.
+
+    A unit is kept or dropped whole: keeping it keeps every field in it, which
+    is the entire point - see picker_units. A unit with no recorded flag counts
+    as kept, for the same reason excluded_from does.
+    """
+    kept = set()
+    for key, _, members in units:
+        if keep_flags.get(key, True):
+            kept.update(members)
+    return [name for name in all_fields if name not in kept]
 
 
 def extractable_aliases(aliases, all_fields):

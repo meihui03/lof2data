@@ -21,6 +21,7 @@ from PIL import Image, ImageColor, ImageDraw, ImageFont
 import boxes
 import fields as field_picker
 import models
+import table as comparison_table
 from groundtruth import (
     amounts_match, build_canonical_ground_truth, CANONICAL_FIELD_KINDS,
     CANONICAL_FIELDS, choice_match, dates_match, fetch_sale, ids_match,
@@ -59,6 +60,7 @@ VLLM_ALIASES = {
     "Tenant IC": ["Tenant NRIC/Passport No."],
     "Landlord Name": ["Landlord Name(s)", "Vendor Name"],
     "Landlord IC": ["Landlord NRIC/Passport No."],
+    "Landlord Address": ["Landlord Address"],
 }
 
 # The palette. Up here rather than beside the CSS that also uses it, because
@@ -149,14 +151,35 @@ def run_hybrid_extraction(pdf_path, output_dir, model, grounded=True, exclude=()
         return json.load(f)
 
 
+def engine_fingerprint():
+    """Enough of the engine module to notice it changed - its size and mtime.
+
+    This is the cache key for the field list below. Streamlit keys a cached
+    function on its own code and its arguments, and the engine's schema is
+    neither: without this, editing extractor.py to add a field left the picker
+    serving the list it read at startup, with the new field simply missing and
+    nothing to suggest why. Restarting the app was the only cure, and there was
+    no reason for anyone to guess at it.
+
+    None when the module can't be stat'd, which is the same key every time -
+    no worse than the unkeyed cache it replaces, and list_engine_fields()
+    reports the unreachable engine anyway."""
+    try:
+        stat = (ENGINE_DIR / "extractor.py").stat()
+    except OSError:
+        return None
+    return (stat.st_mtime_ns, stat.st_size)
+
+
 @st.cache_data(show_spinner=False)
-def list_engine_fields():
+def list_engine_fields(fingerprint=None):
     """Every field the engine can extract, in its own order.
 
     Asked of the engine rather than listed here, so the schema stays the one
     place a field is defined - add one there and it becomes pickable with no
-    edit on this side. Cached with no TTL: it is a subprocess launch, and the
-    answer only changes when the code does.
+    edit on this side. Cached on `fingerprint` (see engine_fingerprint): it is
+    a subprocess launch per call, and the answer really does only change when
+    the engine does.
 
     Returns [] if the engine can't be reached. The picker then says so and
     steps aside rather than blocking a run it isn't needed for - an
@@ -200,23 +223,32 @@ def collect_field_boxes(result):
     when it named a valid OCR line, otherwise fall back to matching the
     extracted value's text directly against the OCR result (find_box_by_text)
     - this needs no knowledge of which of any number of possible form
-    layouts the page uses. Returns [{"label": str, "page": int, "box":
-    (x0,y0,x1,y1) fractions, "color": str}, ...]."""
+    layouts the page uses. Returns [{"label": str, "display": str,
+    "page": int, "box": (x0,y0,x1,y1) fractions, "color": str}, ...].
+
+    "label" is the internal name a box was found under; "display" is what a
+    reader should see. They differ for a group sub-field, which the raw reply
+    nests ("agent"/"Name") and the table names flat ("Negotiator/Agent Name").
+    Both passes below box the same line, so without the second name the
+    legend printed one line twice, under two names for one field."""
     ocr_boxes = result.get("_ocr_boxes", [])
     ocr_by_index = {b["index"]: b for b in ocr_boxes}
     raw = result.get("_raw", {})
     # {sub-field: option list} for the choice fields, published by the engine
     # from its own schema (extractor.choice_candidates).
     candidates_by_field = raw.get("_choice_candidates", {})
+    # Published by the engine alongside the choice candidates, for the same
+    # reason: the UI needs the schema's own mapping and must not restate it.
+    flat_names = boxes.flat_name_by_group_path(raw.get("_field_sources"))
     found = []
 
-    def add_box(label, b, color):
+    def add_box(label, b, color, display=None):
         found.append({
-            "label": label, "page": b["page"],
+            "label": label, "display": display or label, "page": b["page"],
             "box": (b["x0"], b["y0"], b["x1"], b["y1"]), "color": color,
         })
 
-    def add_from_leaf(label, leaf, candidates=None):
+    def add_from_leaf(label, leaf, candidates=None, display=None):
         # The model does not always use the {value, confidence, source_index}
         # envelope the prompt asks for - a bare string is common, and used to
         # be dropped here while the flattener accepted it, so the value showed
@@ -235,7 +267,7 @@ def collect_field_boxes(result):
         cited = boxes.cited_boxes(ocr_by_index, leaf.get("source_index"), value=value)
         if cited:
             for b in cited:
-                add_box(label, b, BOX_COLOR)
+                add_box(label, b, BOX_COLOR, display)
             return
         if not value:
             return
@@ -247,7 +279,7 @@ def collect_field_boxes(result):
         if b is None:
             b = boxes.find_box_by_text(ocr_boxes, value)
         if b is not None:
-            add_box(label, b, BOX_COLOR)
+            add_box(label, b, BOX_COLOR, display)
 
     for name, leaf in raw.get("fields", {}).items():
         add_from_leaf(name, leaf)
@@ -258,8 +290,17 @@ def collect_field_boxes(result):
             if not isinstance(occurrence, dict):
                 continue
             for sub_field, leaf in occurrence.items():
+                display = boxes.group_display_name(group_name, sub_field, flat_names)
+                # None = extracted to help the model structure its answer, but
+                # offered by no checkbox and shown in no row, so it has no
+                # business being highlighted and numbered on the page.
+                if display is None:
+                    continue
+                # The label stays the raw path: it is what the sweep below
+                # checks against, and changing it there would change which
+                # values that safety net still looks for.
                 add_from_leaf(f"{group_name}.{sub_field}", leaf,
-                              candidates_by_field.get(sub_field))
+                              candidates_by_field.get(sub_field), display=display)
 
     # Finally, sweep the FLATTENED fields - the ones the comparison table
     # actually shows. Everything above walks the model's raw reply, so a value
@@ -316,8 +357,11 @@ def regions_on_page(field_boxes, page_num):
             continue
         key = tuple(round(v, 4) for v in f["box"])
         entry = regions.setdefault(key, {"color": f["color"], "labels": []})
-        if f["label"] not in entry["labels"]:
-            entry["labels"].append(f["label"])
+        # By display name, so the same field found by both passes - once under
+        # the raw group path, once under its flat name - is listed once.
+        name = f.get("display") or f["label"]
+        if name not in entry["labels"]:
+            entry["labels"].append(name)
     ordered = sorted(regions.items(), key=lambda kv: (kv[0][1], kv[0][0]))
     return [(box, entry["color"], entry["labels"]) for box, entry in ordered]
 
@@ -432,16 +476,49 @@ st.markdown(f"""
     font-weight: 600; letter-spacing: 0.03em; margin-bottom: 0.5rem;
 }}
 .section-title {{ color: {DARK}; font-size: 1.4rem; font-weight: 700; margin: 0 0 0.75rem 0; }}
-/* The comparison table (st.table, not the grid - see the note where it is
-   rendered). Left-aligned and top-aligned so a wrapped address reads as one
-   block against the record beside it, rather than floating mid-cell. */
-div[data-testid="stTable"] table {{ width: 100%; table-layout: auto; }}
-div[data-testid="stTable"] th {{
-    background: {BG}; color: {DARK}; text-align: left; font-weight: 600;
+/* The comparison table. Markup is ours (table.py), so these selectors are a
+   contract with that file rather than with Streamlit's DOM. */
+.comparison-wrap {{
+    border: 1px solid #DDE5EA; border-radius: 10px; overflow: hidden;
+    background: white;
+    /* The last row otherwise sits flush against the results card's own edge,
+       so the two borders read as one and the table looks cropped. */
+    margin: 0 0 1.25rem 0;
 }}
-div[data-testid="stTable"] td {{ vertical-align: top; text-align: left; }}
-div[data-testid="stTable"] th:last-child,
-div[data-testid="stTable"] td:last-child {{ text-align: center; width: 4rem; }}
+table.comparison {{
+    width: 100%; border-collapse: collapse; font-size: 0.93rem;
+}}
+/* The header has to be unmistakably NOT data: darker ground, heavier and
+   smaller type, letter-spaced, and a rule under it. Same weight and colour as
+   the rows left the eye with nothing to anchor on. */
+table.comparison thead th {{
+    background: #E7EEF3; color: {DARK};
+    font-weight: 700; font-size: 0.74rem; letter-spacing: 0.06em;
+    text-transform: uppercase; text-align: left; white-space: nowrap;
+    padding: 0.65rem 0.85rem; border-bottom: 2px solid {PRIMARY};
+}}
+/* The field name is a row heading, not a value - semibold, and never wrapped
+   mid-name if it can be helped. */
+table.comparison tbody th {{
+    text-align: left; font-weight: 600; color: {DARK};
+    padding: 0.55rem 0.85rem; vertical-align: top; width: 22%;
+}}
+table.comparison tbody td {{
+    color: #37474F; padding: 0.55rem 0.85rem; vertical-align: top;
+}}
+/* Striping and a hover row: on a 28-row table with wrapped addresses, the eye
+   loses its place between the truth and the extracted value otherwise. */
+table.comparison tbody tr:nth-child(even) {{ background: #FAFCFD; }}
+table.comparison tbody tr:hover {{ background: #EFF7FC; }}
+table.comparison tbody tr + tr th,
+table.comparison tbody tr + tr td {{ border-top: 1px solid #E6ECF0; }}
+table.comparison td.match-col {{ text-align: center; width: 5rem; }}
+/* Plain glyphs, not emoji: an emoji ignores colour on most platforms, so a
+   wrong row would print in the same ink as a right one. */
+.comparison .mark {{ font-size: 1.05rem; font-weight: 700; }}
+.comparison .mark.ok {{ color: #2E7D53; }}
+.comparison .mark.bad {{ color: #C0392B; }}
+.comparison .mark.na {{ color: #9AA8B2; font-weight: 400; }}
 div[data-testid="stButton"] button:disabled,
 div[data-testid="stButton"] button:disabled:hover,
 div[data-testid="stButton"] button:disabled:focus,
@@ -561,7 +638,7 @@ with st.container(border=True):
 # Asked once per session (the answer changes only when the engine's schema
 # does) and read before the picker renders, so the checkboxes below are the
 # engine's own list rather than a copy of it kept over here.
-all_fields = list_engine_fields()
+all_fields = list_engine_fields(engine_fingerprint())
 processing = st.session_state["is_processing"]
 
 with st.container(border=True):
@@ -579,17 +656,31 @@ with st.container(border=True):
             "the engine really is unavailable."
         )
     else:
+        # One tick can cover more than one field - see fields.picker_units.
+        units = field_picker.picker_units(all_fields, VLLM_ALIASES.values())
+
+        # Seed the defaults into session state instead of passing value=True to
+        # each checkbox. A widget that carries BOTH an explicit default and a
+        # session-state value written for its key draws a Streamlit warning -
+        # "created with a default value but also had its value set via the
+        # Session State API" - which is precisely what Clear and Select all do.
+        # State is the single source of truth for a tick from here on.
+        for key, _, _ in units:
+            if field_key(key) not in st.session_state:
+                st.session_state[field_key(key)] = True
+
         # Read from session state rather than from the checkboxes, which don't
         # exist yet on this run - the count has to render above them.
-        kept_now = sum(1 for name in all_fields
-                       if st.session_state.get(field_key(name), True))
+        kept_now = sum(len(members) for key, _, members in units
+                       if st.session_state.get(field_key(key), True))
         count_col, all_col, none_col = st.columns([4, 1, 1], vertical_alignment="bottom")
         with count_col:
             st.caption(
                 f"**{kept_now} of {len(all_fields)}** selected. Untick anything you "
                 "don't need: an unticked field is never put to the model, so it "
                 "costs no time — and no column in the table. The list is the "
-                "form's own; there is nothing to add to it."
+                "form's own; there is nothing to add to it. Two fields that "
+                "answer the same comparison row are offered as one tick."
             )
         with all_col:
             select_all = st.button("Select all", key="fields_all",
@@ -601,22 +692,28 @@ with st.container(border=True):
             # Safe to write these keys here: the checkboxes they belong to are
             # created below, so on this run they don't exist yet, and the rerun
             # renders them from the state just written.
-            for name in all_fields:
-                st.session_state[field_key(name)] = bool(select_all)
+            for key, _, _ in units:
+                st.session_state[field_key(key)] = bool(select_all)
             st.rerun()
 
         # Grouped because 28 checkboxes in one list is a wall - see fields.py,
         # which owns the grouping and drops a section the engine no longer has.
         section_cols = st.columns(3)
-        for i, (title, names) in enumerate(field_picker.sectioned_fields(all_fields)):
+        sections = field_picker.sectioned_units(all_fields, VLLM_ALIASES.values())
+        for i, (title, section) in enumerate(sections):
             with section_cols[i % len(section_cols)]:
                 st.markdown(f"**{title}**")
-                for name in names:
-                    keep_flags[name] = st.checkbox(
-                        name, value=True, key=field_key(name), disabled=processing)
+                for key, label, members in section:
+                    keep_flags[key] = st.checkbox(
+                        label, key=field_key(key), disabled=processing,
+                        help=("These fields answer one comparison row, so they are "
+                              "extracted together — a form with no \"Attn:\" line "
+                              "still names the same person under \"Witnessed by\"."
+                              ) if len(members) > 1 else None)
                 st.write("")
 
-    excluded = field_picker.excluded_from(all_fields, keep_flags)
+    excluded = (field_picker.excluded_from_units(all_fields, units, keep_flags)
+                if all_fields else [])
     nothing_selected = bool(all_fields) and len(excluded) == len(all_fields)
     if nothing_selected:
         st.caption(":material/warning: Pick at least one field to extract.")
@@ -685,17 +782,18 @@ if st.session_state["is_processing"]:
             extracted_value = lookup_extracted(extracted_fields, aliases)
             has_api_value = api_value not in (None, "")
             if not has_api_value:
-                match_display = "—"
+                match_display = comparison_table.NA
             else:
                 verifiable += 1
                 kind = CANONICAL_FIELD_KINDS.get(field, "text")
                 matched = bool(extracted_value) and field_match(kind, api_value, extracted_value)
                 correct += matched
-                match_display = "✔️" if matched else "✖️"
+                match_display = comparison_table.MATCH if matched else comparison_table.MISS
             rows.append({
                 "Field": field,
-                "Ground Truth (API)": api_value if has_api_value else "—",
-                "Extracted": extracted_value if extracted_value not in (None, "") else "—",
+                "Ground Truth (API)": api_value if has_api_value else comparison_table.NA,
+                "Extracted": (extracted_value if extracted_value not in (None, "")
+                              else comparison_table.NA),
                 "Match": match_display,
             })
 
@@ -766,19 +864,13 @@ if "comparison_df" in st.session_state:
                     use_container_width=True,
                 )
 
-            # st.table, not st.dataframe: the dataframe grid is canvas-rendered
-            # and CLIPS a value too long for its column - a full address came out
-            # as "A-34-08, JALAN DUA, RESIDENSI TROFI 1, 55200, S..." with no way
-            # to widen it from here and no CSS that can reach inside. That is the
-            # one thing this table exists to show, since a truncated value can't
-            # be checked against the record beside it. st.table renders real HTML
-            # and wraps, so every value is visible in full.
-            #
-            # The cost is sorting and column-resizing, which the grid gave and
-            # this doesn't. Worth it: the rows are in the order a reader checks
-            # them, and there are at most 28 of them - fewer once Step 2 has
-            # narrowed the run.
-            st.table(df.set_index("Field"))
+            # Our own markup rather than st.dataframe or st.table - see
+            # table.py for why. Every value shows in full, and the header is
+            # styled by this app's stylesheet instead of Streamlit's.
+            st.markdown(
+                comparison_table.comparison_table_html(st.session_state["comparison_df"]),
+                unsafe_allow_html=True,
+            )
 
         with tab_source:
             # Every box is anchored to an OCR line, so an ungrounded run has

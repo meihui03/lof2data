@@ -69,6 +69,32 @@ class TestLandlordParties(unittest.TestCase):
         self.assertIsNone(truth["Landlord Name"])
 
 
+class TestLandlordAddress(unittest.TestCase):
+    """Read the same way as the landlord's name and NRIC, so a record that
+    carries an address per party compares automatically - and one that
+    doesn't resolves to None and displays as not-verifiable rather than
+    raising, the way a landlord with no NRIC on file already does."""
+
+    def sale(self, landlords):
+        return {"amla_purpose": {"vendors_or_landlords": landlords}}
+
+    def test_reads_the_address_when_the_record_has_one(self):
+        sale = self.sale([{"name": "MAH CHEE WENG", "address": "12 JALAN SATU, KL"}])
+        self.assertEqual(G.CANONICAL_API_MAP["Landlord Address"](sale), "12 JALAN SATU, KL")
+
+    def test_two_co_landlords_join_the_way_the_extractor_joins(self):
+        sale = self.sale([{"address": "12 JALAN SATU"}, {"address": "34 JALAN DUA"}])
+        self.assertEqual(G.CANONICAL_API_MAP["Landlord Address"](sale),
+                         "12 JALAN SATU / 34 JALAN DUA")
+
+    def test_a_record_with_no_address_key_is_none_not_an_error(self):
+        sale = self.sale([{"name": "MAH CHEE WENG", "nric": "800101015555"}])
+        self.assertIsNone(G.CANONICAL_API_MAP["Landlord Address"](sale))
+
+    def test_no_landlords_at_all_is_none(self):
+        self.assertIsNone(G.CANONICAL_API_MAP["Landlord Address"](self.sale([])))
+
+
 class TestCanonicalMap(unittest.TestCase):
     def test_every_canonical_field_has_a_mapping(self):
         self.assertEqual(set(G.CANONICAL_FIELDS), set(G.CANONICAL_API_MAP))

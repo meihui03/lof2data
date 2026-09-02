@@ -367,5 +367,91 @@ class TestFindChoiceLine(unittest.TestCase):
         self.assertIsNone(boxes.find_choice_line([], ["NOT", "PARTLY"]))
 
 
+class TestFlatNameByGroupPath(unittest.TestCase):
+    """The legend used to print one line twice - "agent.Name · Negotiator/
+    Agent Name" - because the raw reply nests a party's name under its group
+    while the table names it flat, and both passes box the same line."""
+
+    SOURCES = {
+        "Reference No.": ["field", "Reference No."],
+        "Property Address": ["group", "property", "Address"],
+        "Negotiator/Agent Name": ["group", "agent", "Name"],
+        "Landlord NRIC/Passport No.": ["group", "landlord", "NRIC/Passport No."],
+    }
+
+    def test_a_group_path_maps_to_its_flat_name(self):
+        names = boxes.flat_name_by_group_path(self.SOURCES)
+        self.assertEqual(names["agent.Name"], "Negotiator/Agent Name")
+        self.assertEqual(names["property.Address"], "Property Address")
+
+    def test_a_sub_field_name_with_a_slash_still_keys_correctly(self):
+        names = boxes.flat_name_by_group_path(self.SOURCES)
+        self.assertEqual(names["landlord.NRIC/Passport No."],
+                         "Landlord NRIC/Passport No.")
+
+    def test_a_top_level_field_needs_no_translation(self):
+        # It is already the name the table shows.
+        self.assertNotIn("Reference No.", boxes.flat_name_by_group_path(self.SOURCES))
+
+    def test_nothing_published_is_an_empty_map(self):
+        # An older engine, or a run whose result predates the field_sources
+        # key: the legend falls back to readable_group_path rather than
+        # breaking.
+        self.assertEqual(boxes.flat_name_by_group_path(None), {})
+        self.assertEqual(boxes.flat_name_by_group_path({}), {})
+
+    def test_a_malformed_source_is_skipped(self):
+        self.assertEqual(boxes.flat_name_by_group_path({"X": "group", "Y": ["group"]}), {})
+
+    def test_tuples_work_as_well_as_lists(self):
+        # field_sources() returns tuples; JSON turns them into lists.
+        names = boxes.flat_name_by_group_path({"Property Address": ("group", "property", "Address")})
+        self.assertEqual(names["property.Address"], "Property Address")
+
+
+class TestGroupDisplayName(unittest.TestCase):
+    """A group sub-field that reaches no checkbox and no table row must not be
+    highlighted - it was numbered and legended for something the reader never
+    asked for and cannot switch off."""
+
+    FLAT = {
+        "landlord.Name": "Landlord Name(s)",
+        "landlord.Address": "Landlord Address",
+        "witness.Name": "Witnessed by",
+    }
+
+    def test_a_sub_field_that_feeds_a_row_is_shown_by_that_name(self):
+        self.assertEqual(boxes.group_display_name("landlord", "Name", self.FLAT),
+                         "Landlord Name(s)")
+
+    def test_a_sub_field_that_feeds_nothing_is_not_shown(self):
+        # A witness's NRIC: extracted to tell one signature block from
+        # another, offered by no picker, shown in no row.
+        self.assertIsNone(
+            boxes.group_display_name("witness", "NRIC/Passport No.", self.FLAT))
+
+    def test_a_sub_field_of_an_unknown_group_is_not_shown_either(self):
+        self.assertIsNone(boxes.group_display_name("guarantor", "Name", self.FLAT))
+
+    def test_no_mapping_at_all_falls_back_to_showing_everything(self):
+        # An older result published no field_sources; with no mapping there is
+        # no basis to call anything unoffered, so nothing is hidden.
+        self.assertEqual(boxes.group_display_name("witness", "NRIC/Passport No.", {}),
+                         "Witness NRIC/Passport No.")
+        self.assertEqual(boxes.group_display_name("witness", "NRIC/Passport No.", None),
+                         "Witness NRIC/Passport No.")
+
+
+class TestReadableGroupPath(unittest.TestCase):
+    def test_a_sub_field_with_no_flat_name_reads_as_words(self):
+        # Extracted, but never in the table, so nothing renames it.
+        self.assertEqual(boxes.readable_group_path("witness", "Signature Date"),
+                         "Witness Signature Date")
+
+    def test_the_sub_fields_own_capitalisation_is_kept(self):
+        self.assertEqual(boxes.readable_group_path("tenant", "NRIC/Passport No."),
+                         "Tenant NRIC/Passport No.")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

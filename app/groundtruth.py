@@ -100,6 +100,7 @@ CANONICAL_FIELDS = [
     "Tenant IC",
     "Landlord Name",
     "Landlord IC",
+    "Landlord Address",
 ]
 
 CANONICAL_API_MAP = {
@@ -119,6 +120,12 @@ CANONICAL_API_MAP = {
     "Tenant IC": lambda s: _tenant_client(s).get("nric"),
     "Landlord Name": lambda s: _join_parties(_landlord_parties(s), "name"),
     "Landlord IC": lambda s: _join_parties(_landlord_parties(s), "nric"),
+    # Read the same way as the two above, so a record that carries an address
+    # per landlord party compares automatically. _join_parties uses .get(), so
+    # a record without the key resolves to None and the row displays as
+    # not-verifiable rather than raising - the same handling a landlord with
+    # no NRIC on file already gets.
+    "Landlord Address": lambda s: _join_parties(_landlord_parties(s), "address"),
 }
 
 CANONICAL_FIELD_KINDS = {

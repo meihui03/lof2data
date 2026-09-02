@@ -87,9 +87,21 @@ class TestFieldPicker(unittest.TestCase):
     def picker(self, at):
         return [c for c in at.checkbox if c.key and c.key.startswith("keep::")]
 
-    def test_every_engine_field_gets_a_checkbox(self):
+    def test_every_engine_field_is_offered(self):
+        # One checkbox per PICK, not per field: two fields answering the same
+        # comparison row are offered together (fields.picker_units).
         at = run_app()
-        self.assertEqual(len(self.picker(at)), len(app_module_fields()))
+        self.assertEqual(len(self.picker(at)), len(app_module_units()))
+        offered = {name for _, _, members in app_module_units() for name in members}
+        self.assertEqual(offered, set(app_module_fields()))
+
+    def test_the_paired_fields_are_a_single_checkbox(self):
+        # A form with no "Attn:" line still names the negotiator under
+        # "Witnessed by", so keeping one and dropping the other loses the row.
+        at = run_app()
+        labels = [c.label for c in self.picker(at)]
+        self.assertIn("Negotiator/Agent Name · Witnessed by", labels)
+        self.assertNotIn("Witnessed by", labels)
 
     def test_they_all_start_ticked(self):
         at = run_app()
@@ -106,7 +118,7 @@ class TestFieldPicker(unittest.TestCase):
         first = self.picker(at)[0]
         at.checkbox(key=first.key).set_value(False).run()
         still_on = [c for c in self.picker(at) if c.value]
-        self.assertEqual(len(still_on), len(app_module_fields()) - 1)
+        self.assertEqual(len(still_on), len(app_module_units()) - 1)
 
     def test_clearing_everything_disables_extract(self):
         # The engine refuses a run with nothing to extract; the button should
@@ -136,7 +148,17 @@ class TestFieldPicker(unittest.TestCase):
 def app_module_fields():
     """What the engine publishes - asked the same way app.py asks."""
     import app as app_module
-    return app_module.list_engine_fields()
+    return app_module.list_engine_fields(app_module.engine_fingerprint())
+
+
+def app_module_units():
+    """What Step 2 offers as one tick each - built the same way app.py builds
+    it, so a change to the grouping rule doesn't need a second edit here."""
+    import app as app_module
+    import fields
+    return fields.picker_units(
+        app_module.list_engine_fields(app_module.engine_fingerprint()),
+        app_module.VLLM_ALIASES.values())
 
 
 if __name__ == "__main__":

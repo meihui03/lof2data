@@ -21,7 +21,7 @@ ALL = [
     "Special/Other Condition(s)", "Notice to Quit (months)",
     "Description of Property/Property Type", "Property Address",
     "Title Details", "Premise Usage", "Furnished Status",
-    "Landlord Name(s)", "Landlord NRIC/Passport No.",
+    "Landlord Name(s)", "Landlord NRIC/Passport No.", "Landlord Address",
     "Tenant Name(s)/Company", "Tenant NRIC/Passport No.", "Tenant Address",
     "Negotiator/Agent Name", "Witnessed by",
 ]
@@ -72,6 +72,103 @@ class TestRowIsHidden(unittest.TestCase):
 
     def test_a_row_with_no_aliases_is_never_hidden(self):
         self.assertFalse(F.row_is_hidden([], excluded={"Monthly Rental"}))
+
+
+# app.py's alias map, values only - the shape picker_units is given.
+ALIAS_GROUPS = [
+    ["Negotiator/Agent Name", "Witnessed by"],
+    ["Tenant Name(s)/Company", "Purchaser Name(s)"],   # sibling schema name
+    ["Landlord Name(s)", "Vendor Name"],               # sibling schema name
+    ["Monthly Rental"],
+]
+
+
+class TestPickerUnits(unittest.TestCase):
+    """Two fields that answer ONE comparison row have to be one tick.
+
+    A real document (73009) carries no "Attn:" line at all and names the
+    negotiator only under "Witnessed by". The extractor is told to return no
+    agent rather than promote a witness into the role, so on that form the
+    witness IS the answer to the "Attn: Negotiator(s) / Witness" row. Keeping
+    the negotiator while dropping the witness left the row blank and scored it
+    a miss, with the answer sitting on the page unread."""
+
+    def units(self, fields=None):
+        return F.picker_units(fields if fields is not None else ALL, ALIAS_GROUPS)
+
+    def test_fields_answering_one_row_become_one_unit(self):
+        pairs = [u for u in self.units() if len(u[2]) > 1]
+        self.assertEqual(len(pairs), 1)
+        key, label, members = pairs[0]
+        self.assertEqual(members, ["Negotiator/Agent Name", "Witnessed by"])
+        self.assertEqual(label, "Negotiator/Agent Name · Witnessed by")
+        self.assertEqual(key, "Negotiator/Agent Name")
+
+    def test_every_field_is_offered_exactly_once(self):
+        offered = [name for _, _, members in self.units() for name in members]
+        self.assertEqual(sorted(offered), sorted(ALL))
+        self.assertEqual(len(offered), len(set(offered)))
+
+    def test_an_alias_the_engine_doesnt_offer_never_forms_a_unit(self):
+        # "Purchaser Name(s)" belongs to a sibling extractor's schema; it must
+        # not appear in the picker, nor pull Tenant Name into a pair.
+        tenant = [u for u in self.units() if u[0] == "Tenant Name(s)/Company"]
+        self.assertEqual(tenant[0][2], ["Tenant Name(s)/Company"])
+
+    def test_units_follow_the_engines_order(self):
+        keys = [key for key, _, _ in self.units()]
+        self.assertEqual(keys, sorted(keys, key=ALL.index))
+
+    def test_a_unit_whose_partner_is_missing_stands_alone(self):
+        # The engine dropped a field: the survivor is still pickable.
+        fields = [n for n in ALL if n != "Witnessed by"]
+        unit = [u for u in self.units(fields) if u[0] == "Negotiator/Agent Name"][0]
+        self.assertEqual(unit[2], ["Negotiator/Agent Name"])
+
+    def test_no_alias_groups_means_one_unit_per_field(self):
+        self.assertEqual(len(F.picker_units(ALL, [])), len(ALL))
+        self.assertEqual(len(F.picker_units(ALL, None)), len(ALL))
+
+
+class TestSectionedUnits(unittest.TestCase):
+    def test_a_paired_unit_appears_once_in_its_section(self):
+        sections = dict(F.sectioned_units(ALL, ALIAS_GROUPS))
+        labels = [label for _, label, _ in sections["Parties"]]
+        self.assertIn("Negotiator/Agent Name · Witnessed by", labels)
+        self.assertNotIn("Witnessed by", labels)
+
+    def test_every_field_still_reaches_a_section(self):
+        sections = F.sectioned_units(ALL, ALIAS_GROUPS)
+        offered = [n for _, section in sections for _, _, members in section for n in members]
+        self.assertEqual(sorted(offered), sorted(ALL))
+
+    def test_sections_keep_their_declared_order(self):
+        titles = [title for title, _ in F.sectioned_units(ALL, ALIAS_GROUPS)]
+        self.assertEqual(titles, [t for t, _ in F.FIELD_SECTIONS])
+
+
+class TestExcludedFromUnits(unittest.TestCase):
+    def test_dropping_a_pair_drops_both_its_fields(self):
+        units = F.picker_units(ALL, ALIAS_GROUPS)
+        excluded = F.excluded_from_units(ALL, units, {"Negotiator/Agent Name": False})
+        self.assertEqual(excluded, ["Negotiator/Agent Name", "Witnessed by"])
+
+    def test_keeping_a_pair_keeps_both_its_fields(self):
+        # The bug this exists for: the witness must not be droppable while the
+        # negotiator is kept, since either can answer the row.
+        units = F.picker_units(ALL, ALIAS_GROUPS)
+        self.assertEqual(F.excluded_from_units(ALL, units, {}), [])
+
+    def test_a_single_field_unit_behaves_as_before(self):
+        units = F.picker_units(ALL, ALIAS_GROUPS)
+        self.assertEqual(F.excluded_from_units(ALL, units, {"Monthly Rental": False}),
+                         ["Monthly Rental"])
+
+    def test_order_follows_the_engine_list(self):
+        units = F.picker_units(ALL, ALIAS_GROUPS)
+        flags = {"Witnessed by": False, "Date": False, "Negotiator/Agent Name": False}
+        self.assertEqual(F.excluded_from_units(ALL, units, flags),
+                         ["Date", "Negotiator/Agent Name", "Witnessed by"])
 
 
 class TestExtractableAliases(unittest.TestCase):

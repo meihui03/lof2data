@@ -22,6 +22,61 @@ or struck mark, which the model has no OCR line to cite for.
 import re
 
 
+def flat_name_by_group_path(field_sources):
+    """{"agent.Name": "Negotiator/Agent Name", ...} from the engine's
+    published field_sources().
+
+    The raw reply nests a party's name under its group, while the comparison
+    table shows the flattened name. Both get a box, and without this they
+    reached the legend as two entries for one line - "agent.Name ·
+    Negotiator/Agent Name" - which reads as two findings when there is one.
+
+    Built from what the engine published rather than written out here: the
+    same rule as the choice-field candidates, and for the same reason - a
+    second copy of the schema's own mapping would drift from it silently.
+    """
+    names = {}
+    for flat_name, source in (field_sources or {}).items():
+        # ("group", <group>, <sub-field>); a top-level field is ("field", name)
+        # and needs no translation.
+        if isinstance(source, (list, tuple)) and len(source) == 3 and source[0] == "group":
+            names[f"{source[1]}.{source[2]}"] = flat_name
+    return names
+
+
+def group_display_name(group, sub_field, flat_names):
+    """What to call a raw group sub-field in the overlay, or None to leave it
+    out of the overlay entirely.
+
+    A group can carry a sub-field the UI has no other trace of - a witness's
+    NRIC, which is extracted so the model can tell one signature block from
+    another, while no checkbox offers it and no table row shows it. Drawing it
+    anyway numbers a region in the legend for something the reader never asked
+    for and cannot switch off - noise in the one view whose job is to show
+    where the CHECKED values came from. (A party's designation and signature
+    date were in the same position and have since left the schema entirely;
+    this rule is what covers whatever is left.)
+
+    So a sub-field is shown only when it feeds a flattened field. The one
+    exception is an empty `flat_names`, which means the engine published no
+    mapping at all (an older result): there is then no basis to call anything
+    unoffered, so everything is shown, named as readably as possible.
+    """
+    if not flat_names:
+        return readable_group_path(group, sub_field)
+    return flat_names.get(f"{group}.{sub_field}")
+
+
+def readable_group_path(group, sub_field):
+    """A group sub-field with no flattened name, written for a human.
+
+    A party's designation and signature date are extracted and boxed but
+    never reach the table, so nothing renames them - "landlord.Signature
+    Date" is the engine's own path, and a legend is not the place for it.
+    """
+    return f"{str(group).capitalize()} {sub_field}"
+
+
 def normalize_source_indexes(source_index):
     """Coerces whatever a model put in "source_index" into a list of int OCR
     indexes, in citation order and without repeats. Anything that isn't a
