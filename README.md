@@ -1,8 +1,8 @@
 # lof2data
 
 Extracts structured fields from a PropNex **Letter of Offer to Rent** PDF and
-shows the result verified against the real CRM record, with bounding boxes on
-the source document marking where each value was read from.
+shows the result verified against the real CRM record, with the source
+document highlighted and numbered where each value was read from.
 
 Handles born-digital PDFs, scans, and photographed/CamScanner documents —
 including handwriting and choice fields marked by circling or striking out
@@ -47,7 +47,7 @@ engine/    extraction — OCR, prompting, choice-field detection
 | `app/app.py` | the UI; shells out to the engine, renders results |
 | `app/fields.py` | groups the engine's field list for the picker, and hides a removed field's row |
 | `app/models.py` | which models are offerable, and cloud rate-limit gating |
-| `app/boxes.py` | turns an LLM `source_index` citation into boxes to draw, and locates a box by text when there's no citation |
+| `app/boxes.py` | turns an LLM `source_index` citation into the region to highlight, and locates one by text when there's no citation |
 | `app/groundtruth.py` | fetches the CRM record and matches values against it |
 | `engine/extractor.py` | OCR, prompt building, extraction, flattening |
 | `engine/mark_detector.py` | template-free reader for circled/struck choices |

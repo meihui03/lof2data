@@ -16,7 +16,7 @@ import fitz
 import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
-from PIL import Image, ImageDraw
+from PIL import Image, ImageColor, ImageDraw, ImageFont
 
 import boxes
 import fields as field_picker
@@ -61,11 +61,41 @@ VLLM_ALIASES = {
     "Landlord IC": ["Landlord NRIC/Passport No."],
 }
 
+# The palette. Up here rather than beside the CSS that also uses it, because
+# the page overlay below needs DARK for its labels and is defined first.
+PRIMARY = "#4FA8E0"
+DARK = "#1E4D6B"
+BG = "#F5F8FA"
+
 # One colour for every box. The blue/orange split used to encode HOW the box
 # was located - the model's own citation vs. a text search - but that is a
 # detail of the lookup, not something a reader of the document needs to act
 # on. Both mean the same thing to them: this is where the value was read.
 BOX_COLOR = "#4FA8E0"
+
+# Drawn as a marker wash rather than an outline: a reader is checking whether
+# the highlighted text IS the value, so the text has to stay readable through
+# it - an outline puts a hard 3px line right where a tight box clips the
+# glyphs. Alpha is the whole trade: high enough to find at a glance on a grey
+# scan, low enough to read printed text through. 64/255 holds both.
+HIGHLIGHT_ALPHA = 64
+# A little room above and below, so the wash reads as a highlighter stroke
+# rather than a box that happens to be filled in.
+HIGHLIGHT_PAD_PX = 2
+# Each highlight is numbered rather than named on the page, and the names go
+# in a legend under it. Field names written next to the wash were unreadable
+# on a real form for two reasons at once: several fields cite the SAME OCR
+# line, so their labels landed on each other exactly, and on a form whose
+# lines are ~28px apart at render scale, a label sitting above its wash falls
+# on the line above's text. A badge collides with neither - it is small, it
+# sits in the left margin, and fields sharing a line share one badge.
+BADGE_FILL = DARK
+BADGE_TEXT_COLOR = "#FFFFFF"
+BADGE_TEXT_SIZE_PX = 14
+BADGE_HEIGHT_PX = 22
+BADGE_MIN_WIDTH_PX = 22   # a pill, so a two-digit number widens instead of clipping
+BADGE_GAP_PX = 5          # between the badge and the wash it belongs to
+LEGEND_COLUMNS = 3
 
 
 def field_match(kind, api_value, extracted_value):
@@ -252,30 +282,131 @@ def collect_field_boxes(result):
     return found
 
 
+def highlight_fill(color, alpha=HIGHLIGHT_ALPHA):
+    """A hex colour as RGBA at the wash's alpha."""
+    return ImageColor.getrgb(color) + (alpha,)
+
+
+def label_font(size=BADGE_TEXT_SIZE_PX):
+    """A readable font for the badge numbers, falling back to the bitmap
+    default. Pillow's sized default needs FreeType, which the container has
+    but a stripped environment might not - and a missing font must not cost
+    the whole overlay."""
+    try:
+        return ImageFont.load_default(size=size)
+    except Exception:
+        return ImageFont.load_default()
+
+
+def regions_on_page(field_boxes, page_num):
+    """[(box, [field name, ...]), ...] for one page, in reading order.
+
+    Fields that resolved to the SAME box are one region, not several: on a
+    real form the negotiator, the property address and the property type all
+    cite lines within a few pixels of each other, and drawing a separate
+    marker per field printed them on top of one another. One badge listing
+    both names says the true thing anyway - this line is where both were
+    read from.
+
+    Reading order (top to bottom, then left to right) so the numbers run down
+    the page the way someone checking it would."""
+    regions = {}
+    for f in field_boxes:
+        if f["page"] != page_num:
+            continue
+        key = tuple(round(v, 4) for v in f["box"])
+        entry = regions.setdefault(key, {"color": f["color"], "labels": []})
+        if f["label"] not in entry["labels"]:
+            entry["labels"].append(f["label"])
+    ordered = sorted(regions.items(), key=lambda kv: (kv[0][1], kv[0][0]))
+    return [(box, entry["color"], entry["labels"]) for box, entry in ordered]
+
+
+def draw_badge(draw, number, px0, px1, py0, py1, page_width, font):
+    """The numbered pill for one region.
+
+    Placed in the left margin beside its wash, which is where the eye looks
+    for a marker and where a form leaves room. A clause printed hard against
+    the left edge has no margin, so the badge goes to the RIGHT of the wash
+    instead - a line's tail is nearly always blank, while its head is the
+    text being pointed at. Only if neither side fits does it sit on the wash
+    itself, covering a character or two, which beats not being drawn."""
+    text = str(number)
+    width = max(BADGE_MIN_WIDTH_PX, draw.textlength(text, font=font) + 10)
+    centre_y = (py0 + py1) / 2
+    top = centre_y - BADGE_HEIGHT_PX / 2
+
+    left = px0 - BADGE_GAP_PX - width
+    if left < 0:
+        right_of = px1 + BADGE_GAP_PX
+        left = right_of if right_of + width <= page_width else px0
+    draw.rounded_rectangle([left, top, left + width, top + BADGE_HEIGHT_PX],
+                           radius=BADGE_HEIGHT_PX / 2, fill=BADGE_FILL)
+    draw.text((left + width / 2, centre_y), text, fill=BADGE_TEXT_COLOR,
+              font=font, anchor="mm")
+
+
 def render_annotated_pages(pdf_bytes, field_boxes, dpi=150):
-    """Renders every page of the PDF and draws every box that belongs to
-    it, labeled with its field name. Returns a list of PIL Images, one per
-    page, in order."""
-    images = []
+    """Every page of the PDF, highlighted and numbered.
+
+    Returns [{"image": PIL.Image, "legend": [(number, "Field · Field"), ...]},
+    ...] - one entry per page, in order. Numbering restarts on each page,
+    since each page is shown with its own legend directly beneath it.
+
+    Every wash for a page goes onto ONE overlay layer, composited in a single
+    pass. Drawn straight onto the page instead, two fields sharing a line
+    (the deposits on an Item/Description/RM row) would stack their alpha and
+    come out darker than the rest - reading as a stronger match when it is
+    only a busier line. On one layer the second draw replaces the first's
+    pixels, so every highlight has the same weight.
+
+    Badges are drawn AFTER compositing, at full strength: the wash is meant to
+    be seen through, the number is not."""
+    pages = []
     with fitz.open(stream=pdf_bytes, filetype="pdf") as pdf:
         for page_num, page in enumerate(pdf):
             pix = page.get_pixmap(dpi=dpi)
-            img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
+            img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGBA")
+            regions = regions_on_page(field_boxes, page_num)
+
+            overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+            wash = ImageDraw.Draw(overlay)
+            placed = []
+            for number, (box, color, labels) in enumerate(regions, start=1):
+                x0, y0, x1, y1 = box
+                px0, py0 = x0 * img.width, y0 * img.height
+                px1, py1 = x1 * img.width, y1 * img.height
+                py0, py1 = max(py0 - HIGHLIGHT_PAD_PX, 0), min(py1 + HIGHLIGHT_PAD_PX, img.height)
+                wash.rectangle([px0, py0, px1, py1], fill=highlight_fill(color))
+                placed.append((number, px0, px1, py0, py1))
+
+            img = Image.alpha_composite(img, overlay).convert("RGB")
             draw = ImageDraw.Draw(img)
-            for f in field_boxes:
-                if f["page"] != page_num:
-                    continue
-                x0, y0, x1, y1 = f["box"]
-                px0, py0, px1, py1 = x0 * img.width, y0 * img.height, x1 * img.width, y1 * img.height
-                draw.rectangle([px0, py0, px1, py1], outline=f["color"], width=3)
-                draw.text((px0, max(py0 - 16, 0)), f["label"], fill=f["color"])
-            images.append(img)
-    return images
+            font = label_font()
+            for number, px0, px1, py0, py1 in placed:
+                draw_badge(draw, number, px0, px1, py0, py1, img.width, font)
+
+            legend = [(number, " · ".join(labels))
+                      for number, (_, _, labels) in enumerate(regions, start=1)]
+            pages.append({"image": img, "legend": legend})
+    return pages
 
 
-PRIMARY = "#4FA8E0"
-DARK = "#1E4D6B"
-BG = "#F5F8FA"
+def render_legend(legend):
+    """The number -> field name key for one page, under its image.
+
+    Filled column-major so the numbers read straight down a column, matching
+    the order they run down the page. A page whose fields all failed to
+    locate has an empty legend and renders nothing rather than an empty row
+    of columns."""
+    if not legend:
+        return
+    per_column = -(-len(legend) // LEGEND_COLUMNS)   # ceil, no math import
+    columns = st.columns(LEGEND_COLUMNS)
+    for i, column in enumerate(columns):
+        for number, names in legend[i * per_column:(i + 1) * per_column]:
+            column.markdown(f"**{number}.**&nbsp; {names}", unsafe_allow_html=True)
+
 
 st.set_page_config(page_title="lof2data", page_icon=":material/diamond:", layout="wide")
 
@@ -301,6 +432,16 @@ st.markdown(f"""
     font-weight: 600; letter-spacing: 0.03em; margin-bottom: 0.5rem;
 }}
 .section-title {{ color: {DARK}; font-size: 1.4rem; font-weight: 700; margin: 0 0 0.75rem 0; }}
+/* The comparison table (st.table, not the grid - see the note where it is
+   rendered). Left-aligned and top-aligned so a wrapped address reads as one
+   block against the record beside it, rather than floating mid-cell. */
+div[data-testid="stTable"] table {{ width: 100%; table-layout: auto; }}
+div[data-testid="stTable"] th {{
+    background: {BG}; color: {DARK}; text-align: left; font-weight: 600;
+}}
+div[data-testid="stTable"] td {{ vertical-align: top; text-align: left; }}
+div[data-testid="stTable"] th:last-child,
+div[data-testid="stTable"] td:last-child {{ text-align: center; width: 4rem; }}
 div[data-testid="stButton"] button:disabled,
 div[data-testid="stButton"] button:disabled:hover,
 div[data-testid="stButton"] button:disabled:focus,
@@ -625,7 +766,19 @@ if "comparison_df" in st.session_state:
                     use_container_width=True,
                 )
 
-            st.dataframe(df, use_container_width=True, hide_index=True)
+            # st.table, not st.dataframe: the dataframe grid is canvas-rendered
+            # and CLIPS a value too long for its column - a full address came out
+            # as "A-34-08, JALAN DUA, RESIDENSI TROFI 1, 55200, S..." with no way
+            # to widen it from here and no CSS that can reach inside. That is the
+            # one thing this table exists to show, since a truncated value can't
+            # be checked against the record beside it. st.table renders real HTML
+            # and wraps, so every value is visible in full.
+            #
+            # The cost is sorting and column-resizing, which the grid gave and
+            # this doesn't. Worth it: the rows are in the order a reader checks
+            # them, and there are at most 28 of them - fewer once Step 2 has
+            # narrowed the run.
+            st.table(df.set_index("Field"))
 
         with tab_source:
             # Every box is anchored to an OCR line, so an ungrounded run has
@@ -639,11 +792,13 @@ if "comparison_df" in st.session_state:
                 )
             else:
                 st.caption(
-                    "Each box marks where a value was read from. A field with no box was "
-                    "read from the page image but couldn't be matched to any line of the "
-                    "document's text — worth checking by eye."
+                    "Each numbered highlight marks where a value was read from — the "
+                    "legend under each page says which field is which. A field listed "
+                    "nowhere was read from the page image but couldn't be matched to any "
+                    "line of the document's text — worth checking by eye."
                 )
             field_boxes = collect_field_boxes(st.session_state["result"])
             pages = render_annotated_pages(st.session_state["pdf_bytes"], field_boxes)
-            for i, page_img in enumerate(pages, start=1):
-                st.image(page_img, caption=f"Page {i}", use_container_width=True)
+            for i, page in enumerate(pages, start=1):
+                st.image(page["image"], caption=f"Page {i}", use_container_width=True)
+                render_legend(page["legend"])

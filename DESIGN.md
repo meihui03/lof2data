@@ -67,11 +67,11 @@ override above, and by the box-matching prefix fallback below — so the
 Every extracted field's box comes from one of two sources, in
 `app/app.py`'s `collect_field_boxes()`:
 
-1. **The LLM's own `source_index` citation** (`BOX_COLOR_CITED`, blue) —
-   every field the LLM extracts is asked to also cite which OCR-recognized
+1. **The LLM's own `source_index` citation** — every field the LLM
+   extracts is asked to also cite which OCR-recognized
    line backed a printed value. When present, that OCR line's box (from
    `engine/extractor.py`'s `get_ocr_boxes_normalized()`) is used directly.
-2. **A text-match fallback** (`BOX_COLOR_MATCHED`, orange) — for values
+2. **A text-match fallback** — for values
    the LLM can't cite an OCR line for (chiefly the 2 choice fields, whose
    value comes from a circled/struck visual mark, not printed OCR text),
    `find_box_by_text()` searches the OCR result directly for a line
@@ -89,6 +89,47 @@ per extraction), and would silently produce no box at all for any form
 outside those 3. The current approach works for any layout the OCR can
 read text from, at no extra OCR cost, since it reuses the same OCR pass
 already run for grounding.
+
+Both sources are now drawn in **one colour**. The blue/orange split used to
+encode which of the two found the region, but that is a fact about the
+lookup, not something a reader of the document can act on — both mean the
+same thing to them: this is where the value was read.
+
+### Drawn as a highlight, not an outline
+
+The regions are rendered as a translucent wash over the text rather than a
+stroked rectangle. The reader's task is to check whether the marked text IS
+the value, so the text has to stay legible through the mark; a 3px outline on
+a tight box lands directly on the glyphs it is pointing at. Alpha is the whole
+trade — visible at a glance on a grey scan, transparent enough to read printed
+text through — and 64/255 holds both.
+
+Every wash on a page goes onto one overlay layer, composited in a single pass.
+Drawn straight onto the page, two fields sharing a line (the deposits on an
+Item/Description/RM row) would stack their alpha and come out darker than the
+rest, reading as a stronger match when it is only a busier line.
+
+### Numbered, not named, on the page
+
+Each region carries a numbered badge in the left margin, and the field names
+go in a legend under the page. Writing the name beside its wash was tried
+first and failed on a real form for two reasons at once: several fields cite
+the **same** OCR line — the negotiator, the property address and the property
+type all resolved to within a few pixels of each other — so their labels
+printed on top of one another; and on a form whose lines are ~28px apart at
+render scale, a label sitting above its wash lands on the line above's text.
+
+A badge collides with neither. It is small, it sits in the margin the form
+already leaves, and fields sharing a line share one badge whose legend entry
+lists both names — which is the true statement anyway: this line is where both
+were read from. The badge falls to the right of the wash for a clause printed
+hard against the left edge, since a line's tail is nearly always blank while
+its head is the text being pointed at.
+
+Note the regions are still **line-level**: `ocr_to_dataframe` emits one row per
+recognized line, so a wash covers the line a value sits on rather than the
+value itself. Word-level boxes would tighten it, and are the one idea worth
+taking from the article `verify_source_index` cites.
 
 ## Model selection: two benchmarked models, cloud gated on quota
 
