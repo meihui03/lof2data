@@ -212,6 +212,18 @@ def probe(name, host=OLLAMA_HOST, timeout=20):
     return classify_probe(response.status_code, response.text)
 
 
+def claude_client(timeout=20):
+    """The SDK client the availability check uses - built the same way as the
+    engine's (extractor._claude_client), so a key that passes here works there.
+    ANTHROPIC_WORKSPACE_ID names the workspace for an organization-level key,
+    which the API otherwise refuses."""
+    import anthropic
+    workspace = os.environ.get("ANTHROPIC_WORKSPACE_ID")
+    headers = {"anthropic-workspace-id": workspace} if workspace else None
+    return anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"), timeout=timeout,
+                               max_retries=1, default_headers=headers)
+
+
 def probe_claude(name, timeout=20):
     """Checks the key and that this account can use the model, by looking
     the model up - free, no tokens. The SDK is imported here so the app
@@ -220,8 +232,7 @@ def probe_claude(name, timeout=20):
     if not api_key:
         return classify_claude_probe(api_key, None)
     try:
-        import anthropic
-        anthropic.Anthropic(api_key=api_key, timeout=timeout, max_retries=1).models.retrieve(name)
+        claude_client(timeout).models.retrieve(name)
         status = 200
     except ImportError:
         status = None

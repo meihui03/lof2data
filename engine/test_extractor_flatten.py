@@ -79,6 +79,34 @@ class TestChatPayload(unittest.TestCase):
         payload = E.build_chat_payload("p", model="m", images=["b64"], json_mode=True)
         self.assertEqual(payload["options"]["num_ctx"], 16384)
 
+    def test_three_page_grounded_scan_fits(self):
+        # The measured failure: lof-32sSaqlbbZ, 3 pages, a 25,389-character
+        # grounded prompt, came to 16,647 prompt tokens on qwen3-vl and was
+        # refused outright - "exceeds the available context size (16384
+        # tokens)". The window has to hold that AND leave room for the reply.
+        payload = E.build_chat_payload("x" * 25389, model="m", images=["b64"] * 3,
+                                       json_mode=True)
+        self.assertGreaterEqual(payload["options"]["num_ctx"], 16647 + 2048)
+
+    def test_window_grows_in_powers_of_two(self):
+        # Ollama reloads the model whenever num_ctx changes; whole steps keep
+        # documents of similar size on the same loaded model.
+        for pages in range(1, 9):
+            n = E.build_chat_payload("x" * 9000 * pages, model="m",
+                                     images=["b64"] * pages, json_mode=True)["options"]["num_ctx"]
+            self.assertEqual(n & (n - 1), 0, f"{pages} pages -> {n}")
+
+    def test_one_page_grounded_keeps_todays_window(self):
+        # 72941: a 17,885-character prompt and one page, 8,212 prompt tokens.
+        # It fit before; it must not get a bigger (slower) window now.
+        payload = E.build_chat_payload("x" * 17885, model="m", images=["b64"], json_mode=True)
+        self.assertEqual(payload["options"]["num_ctx"], 16384)
+
+    def test_window_never_exceeds_what_the_model_supports(self):
+        payload = E.build_chat_payload("x" * 2_000_000, model="m", images=["b64"] * 50,
+                                       json_mode=True)
+        self.assertEqual(payload["options"]["num_ctx"], E.MAX_NUM_CTX)
+
     def test_images_are_attached_to_the_message(self):
         payload = E.build_chat_payload("p", model="m", images=["b64"], json_mode=True)
         self.assertEqual(payload["messages"][0]["images"], ["b64"])
@@ -135,8 +163,44 @@ class TestUngroundedBoxLines(unittest.TestCase):
     price. A scan would need a full OCR pass, which is the cost being avoided,
     so there the boxes genuinely go."""
 
-    DIGITAL = "/Users/meihui/propnex_ai/hybrid/input/72979.pdf"
-    SCAN = "/Users/meihui/propnex_ai/hybrid/input/72834.pdf"
+    # Built here rather than read from real LOFs: those carry names, NRIC
+    # numbers and addresses, so none are committed - and these tests used to
+    # point at a sibling project's input folder, which broke them the moment
+    # this repo was split out. All they need is the one property that drives
+    # the behaviour: a text layer, or only pixels.
+    @classmethod
+    def setUpClass(cls):
+        import tempfile
+        import fitz
+        cls._tmp = tempfile.TemporaryDirectory()
+
+        digital = fitz.open()
+        page = digital.new_page()
+        for i, line in enumerate([
+            "LETTER OF OFFER TO RENT",
+            "The Premise shall be rented NOT / PARTLY / FULLY FURNISHED",
+            "Monthly Rental: RM 2,500.00   Security Deposit: RM 5,000.00",
+            "Tenancy period: 2 years commencing 1 October 2026",
+        ]):
+            page.insert_text((72, 100 + 20 * i), line, fontsize=11)
+        cls.DIGITAL = f"{cls._tmp.name}/digital.pdf"
+        digital.save(cls.DIGITAL)
+
+        # A rendering of that page, embedded as an image: what a scanner
+        # produces - the words are visible, but there is no text to extract.
+        pixmap = page.get_pixmap(dpi=100)
+        scan = fitz.open()
+        scan.new_page().insert_image(scan[0].rect, pixmap=pixmap)
+        cls.SCAN = f"{cls._tmp.name}/scan.pdf"
+        scan.save(cls.SCAN)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def test_fixtures_are_what_they_claim(self):
+        self.assertTrue(E._has_text_layer(self.DIGITAL))
+        self.assertFalse(E._has_text_layer(self.SCAN))
 
     def test_digital_pdf_still_gets_box_lines(self):
         lines = E.ungrounded_box_lines(self.DIGITAL)

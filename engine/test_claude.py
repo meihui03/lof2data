@@ -13,6 +13,7 @@ credit already spent.
 import base64
 import io
 import json
+import os
 import types
 import unittest
 from unittest import mock
@@ -139,6 +140,23 @@ class TestParseClaudeResponse(unittest.TestCase):
     def test_cut_off_reply_raises_instead_of_being_retried_as_bad_json(self):
         with self.assertRaisesRegex(RuntimeError, "max_tokens"):
             E.parse_claude_response(response(text('{"a": '), stop_reason="max_tokens"), elapsed=1)
+
+
+class TestClaudeClient(unittest.TestCase):
+    # An org-level key (not tied to a workspace) is refused with "must
+    # include the anthropic-workspace-id header" - ANTHROPIC_WORKSPACE_ID
+    # supplies it.
+    def test_workspace_id_is_sent_when_set(self):
+        env = {"ANTHROPIC_API_KEY": "sk-ant-x", "ANTHROPIC_WORKSPACE_ID": "wrkspc_123"}
+        with mock.patch.dict(os.environ, env):
+            client = E._claude_client(10)
+        self.assertEqual(client.default_headers.get("anthropic-workspace-id"), "wrkspc_123")
+
+    def test_no_workspace_header_for_a_workspace_key(self):
+        with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-x"}):
+            os.environ.pop("ANTHROPIC_WORKSPACE_ID", None)
+            client = E._claude_client(10)
+        self.assertNotIn("anthropic-workspace-id", client.default_headers)
 
 
 class TestCallLlmRouting(unittest.TestCase):

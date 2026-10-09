@@ -353,6 +353,34 @@ def group_schema_for(exclude=()):
     return kept
 
 
+# The context window (num_ctx) is sized per request. A fixed 16384 held a
+# 1-2 page document but refused a grounded 3-page scan outright: 16,647
+# prompt tokens, "exceeds the available context size (16384 tokens)".
+#
+# The estimate is deliberately generous - an undersized window is a failed
+# run, an oversized one only costs some memory. Measured on qwen3-vl: a
+# rendered page (capped at 2000px) is ~2,800 tokens, and prompt text runs
+# 3.0-4.5 characters per token (the OCR lines tokenize worst).
+MIN_NUM_CTX = 16384          # what every call used before; small documents keep it
+MAX_NUM_CTX = 262144         # qwen3-vl's own limit
+CTX_TOKENS_PER_IMAGE = 4000
+CTX_CHARS_PER_TOKEN = 2.5
+CTX_REPLY_TOKENS = 4096      # the JSON reply is ~1.5k; the window has to hold it too
+
+
+def context_window_for(prompt, images):
+    """num_ctx for one call: the estimated prompt plus room for the reply,
+    rounded up to a power of two - Ollama reloads the model whenever num_ctx
+    changes, so whole steps keep similar documents on the same loaded one."""
+    need = (len(images or []) * CTX_TOKENS_PER_IMAGE
+            + int(len(prompt) / CTX_CHARS_PER_TOKEN)
+            + CTX_REPLY_TOKENS)
+    window = MIN_NUM_CTX
+    while window < need and window < MAX_NUM_CTX:
+        window *= 2
+    return min(window, MAX_NUM_CTX)
+
+
 def build_chat_payload(prompt, model, images, json_mode, schema=None):
     """The /api/chat body for one call.
 
@@ -370,7 +398,7 @@ def build_chat_payload(prompt, model, images, json_mode, schema=None):
         "model": model,
         "messages": [message],
         "stream": False,
-        "options": {"num_ctx": 16384},
+        "options": {"num_ctx": context_window_for(prompt, images)},
     }
     if schema is not None:
         # A JSON Schema here makes the reply's shape a constraint on
@@ -481,9 +509,15 @@ def parse_claude_response(response, elapsed):
 def _claude_client(timeout):
     """Imported here, not at the top, so an Ollama-only setup never needs the
     SDK installed. The key comes from ANTHROPIC_API_KEY, which the app loads
-    from .env and this subprocess inherits."""
+    from .env and this subprocess inherits.
+
+    ANTHROPIC_WORKSPACE_ID is for a key that belongs to the organization
+    rather than a workspace: the API refuses those unless each request names
+    the workspace to bill. A workspace key needs nothing, so it is optional."""
     import anthropic
-    return anthropic.Anthropic(timeout=timeout)
+    workspace = os.environ.get("ANTHROPIC_WORKSPACE_ID")
+    headers = {"anthropic-workspace-id": workspace} if workspace else None
+    return anthropic.Anthropic(timeout=timeout, default_headers=headers)
 
 
 def call_claude(prompt, model, images=None, schema=None, timeout=900):

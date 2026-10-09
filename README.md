@@ -173,7 +173,9 @@ may be vision-capable but unmeasured on this document type.
 
 A third option, **not yet benchmarked** like the two above. Set
 `ANTHROPIC_API_KEY` in `.env` and it appears in the selector as
-`claude api`; without the key it is listed as unavailable with the reason. The
+`claude api`; without the key it is listed as unavailable with the reason.
+An organization-level key (refused with "not scoped to a workspace") also
+needs `ANTHROPIC_WORKSPACE_ID=wrkspc_...` in `.env`. The
 page-load check is a free model lookup — it confirms the key and spends no
 tokens. Running out of prepaid credit only shows on a real run, and takes the
 model out of the selector the same way a spent Ollama quota does.

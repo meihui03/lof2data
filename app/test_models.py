@@ -239,6 +239,18 @@ class TestClaude(unittest.TestCase):
             {"claude-sonnet-5-5": models.NO_API_KEY})
         self.assertIn("ANTHROPIC_API_KEY", blocked[0][1])
 
+    def test_workspace_id_reaches_the_availability_check(self):
+        env = {"ANTHROPIC_API_KEY": "sk-ant-x", "ANTHROPIC_WORKSPACE_ID": "wrkspc_123"}
+        with mock.patch.dict(models.os.environ, env):
+            client = models.claude_client()
+        self.assertEqual(client.default_headers.get("anthropic-workspace-id"), "wrkspc_123")
+
+    def test_no_workspace_header_when_unset(self):
+        with mock.patch.dict(models.os.environ, {"ANTHROPIC_API_KEY": "sk-ant-x"}):
+            models.os.environ.pop("ANTHROPIC_WORKSPACE_ID", None)
+            client = models.claude_client()
+        self.assertNotIn("anthropic-workspace-id", client.default_headers)
+
     def test_claude_is_not_looked_for_among_ollama_models(self):
         # Ollama has never heard of a Claude model; "not installed - run
         # ollama pull" would send the user the wrong way.
