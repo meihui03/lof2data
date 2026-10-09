@@ -169,6 +169,25 @@ To offer another model, add it to `SUPPORTED_MODELS` in `app/models.py`. The
 list is deliberately fixed rather than auto-discovered: other installed models
 may be vision-capable but unmeasured on this document type.
 
+### Claude API (`claude-sonnet-5-5`)
+
+A third option, **not yet benchmarked** like the two above. Set
+`ANTHROPIC_API_KEY` in `.env` and it appears in the selector as
+`claude api`; without the key it is listed as unavailable with the reason. The
+page-load check is a free model lookup — it confirms the key and spends no
+tokens. Running out of prepaid credit only shows on a real run, and takes the
+model out of the selector the same way a spent Ollama quota does.
+
+Same prompt, same page images, same OCR grounding and choice-field override as
+the Ollama models — only the call differs (`call_claude` in
+`engine/extractor.py`). It runs at low effort, since output (thinking
+included) is the expensive side. Rough cost, grounded: ~9–10k input and
+~1.5–4.5k output tokens per page, about **$0.05 per page** at $2 / $10 per
+million tokens.
+
+Unlike the other two, this one sends the pages — names, NRIC numbers,
+addresses — to Anthropic's API.
+
 ## Tests
 
 Stdlib `unittest`, no extra dependency:
@@ -183,6 +202,7 @@ app/.venv/bin/python3 app/test_app_ui.py
 engine/.venv/bin/python3 engine/test_extractor_flatten.py
 engine/.venv/bin/python3 engine/test_schema_models.py
 engine/.venv/bin/python3 engine/test_field_selection.py
+engine/.venv/bin/python3 engine/test_claude.py
 ```
 
 ## Notes

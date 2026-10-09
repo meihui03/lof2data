@@ -383,6 +383,126 @@ def build_chat_payload(prompt, model, images, json_mode, schema=None):
     return payload
 
 
+# --------------------------------------------------------------- Claude API
+#
+# A model named "claude-..." is called through Anthropic's API instead of
+# Ollama. Everything above and below call_llm is unchanged: the same prompt,
+# the same page images, the same (content, meta) return - so a Claude run is
+# scored, boxed and overridden exactly like an Ollama one.
+
+# Claude rejects an image over 5MB. A clean A4 render is well under that, but
+# a photographed page defeats PNG compression and can exceed it - those are
+# re-encoded as JPEG rather than refused.
+CLAUDE_MAX_IMAGE_BYTES = 5 * 1024 * 1024
+
+# Room for the full JSON reply (~1.5k tokens) plus whatever thinking low
+# effort does, without hitting the non-streaming timeout ceiling.
+CLAUDE_MAX_TOKENS = 16000
+
+# Low effort: this is reading values off a page, not reasoning. Thinking is
+# billed as output, the expensive side, so it is the main cost lever per page.
+CLAUDE_EFFORT = "low"
+
+
+def is_claude_model(model):
+    return str(model).startswith("claude-")
+
+
+def claude_image_block(png_b64):
+    """One page as a Claude image block - the PNG as is when it fits, else a
+    JPEG at decreasing quality until it does."""
+    raw = base64.b64decode(png_b64)
+    if len(raw) <= CLAUDE_MAX_IMAGE_BYTES:
+        data, media_type = png_b64, "image/png"
+    else:
+        img = Image.open(io.BytesIO(raw)).convert("RGB")
+        for quality in (90, 80, 70, 60, 50):
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=quality)
+            if buf.tell() <= CLAUDE_MAX_IMAGE_BYTES:
+                break
+        data, media_type = base64.b64encode(buf.getvalue()).decode("ascii"), "image/jpeg"
+    return {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": data}}
+
+
+def claude_json_schema(node):
+    """A copy of `node` with every object closed (additionalProperties:
+    false), which Claude requires of a structured-output schema and Pydantic
+    does not emit. A copy, because the caller's schema is shared with the
+    Ollama path."""
+    if isinstance(node, list):
+        return [claude_json_schema(v) for v in node]
+    if not isinstance(node, dict):
+        return node
+    out = {k: claude_json_schema(v) for k, v in node.items()}
+    if out.get("type") == "object":
+        out["additionalProperties"] = False
+    return out
+
+
+def build_claude_request(prompt, model, images, schema=None):
+    """The messages.create() arguments for one call. Images go before the
+    text, the order Claude reads a document-then-question prompt best in."""
+    content = [claude_image_block(img) for img in images or []]
+    content.append({"type": "text", "text": prompt})
+    output_config = {"effort": CLAUDE_EFFORT}
+    if schema is not None:
+        # Same role as Ollama's "format": the reply's shape becomes a
+        # constraint on generation rather than a request in the prompt.
+        output_config["format"] = {"type": "json_schema", "schema": claude_json_schema(schema)}
+    return {
+        "model": model,
+        "max_tokens": CLAUDE_MAX_TOKENS,
+        "output_config": output_config,
+        "messages": [{"role": "user", "content": content}],
+    }
+
+
+def parse_claude_response(response, elapsed):
+    """(text, meta) from a Claude reply, in call_llm's return_meta shape.
+
+    A refusal or a reply cut off at max_tokens raises here. Returned as text,
+    either would reach parse_llm_json as unparseable and be retried - paying
+    for the same failure up to three times."""
+    if response.stop_reason == "refusal":
+        details = getattr(response, "stop_details", None)
+        raise RuntimeError(f"Claude refused the request: {details}")
+    if response.stop_reason == "max_tokens":
+        raise RuntimeError(
+            f"Claude reply was cut off at max_tokens ({CLAUDE_MAX_TOKENS}) - the JSON is incomplete")
+    content = "".join(block.text for block in response.content if block.type == "text")
+    return content, {
+        "prompt_eval_count": response.usage.input_tokens,
+        "eval_count": response.usage.output_tokens,
+        "time_s": round(elapsed, 1),
+    }
+
+
+def _claude_client(timeout):
+    """Imported here, not at the top, so an Ollama-only setup never needs the
+    SDK installed. The key comes from ANTHROPIC_API_KEY, which the app loads
+    from .env and this subprocess inherits."""
+    import anthropic
+    return anthropic.Anthropic(timeout=timeout)
+
+
+def call_claude(prompt, model, images=None, schema=None, timeout=900):
+    """One Claude call, returning (content, meta). The SDK already retries
+    429s, 5xx and dropped connections; what reaches here is final. Its error
+    message is kept as is - "credit balance is too low" is what the app
+    matches on to take the model out of the selector."""
+    import anthropic
+    request = build_claude_request(prompt, model, images, schema=schema)
+    start = time.monotonic()
+    try:
+        response = _claude_client(timeout).messages.create(**request)
+    except anthropic.APIStatusError as e:
+        raise RuntimeError(f"Claude API error {e.status_code}: {e.message}") from e
+    except anthropic.APIConnectionError as e:
+        raise RuntimeError(f"Could not reach the Claude API: {e}") from e
+    return parse_claude_response(response, time.monotonic() - start)
+
+
 def call_llm(prompt, model=LLM_MODEL, host=OLLAMA_URL, json_mode=True, timeout=900, images=None, return_meta=False, schema=None):
     """Sends a prompt to the given Ollama model via the local daemon -
     which proxies a '-cloud' model name to Ollama's cloud - and returns
@@ -396,7 +516,14 @@ def call_llm(prompt, model=LLM_MODEL, host=OLLAMA_URL, json_mode=True, timeout=9
     fast (no retry) on a "session usage limit" 429 - confirmed this is a
     free-tier quota, not a short-lived burst limit (no Retry-After header,
     and it didn't clear after ~15s of backoff), so retrying just wastes
-    time until the quota window resets on its own."""
+    time until the quota window resets on its own.
+
+    A "claude-..." model goes to the Claude API instead (call_claude) - same
+    arguments, same return."""
+    if is_claude_model(model):
+        content, meta = call_claude(prompt, model, images=images, schema=schema, timeout=timeout)
+        return (content, meta) if return_meta else content
+
     payload = build_chat_payload(prompt, model, images, json_mode, schema=schema)
 
     max_retries = 5
@@ -1335,7 +1462,9 @@ def main():
                              "Subtractive only - there is no matching way to add a "
                              "field that isn't in the schema.")
     parser.add_argument("--model", default=LLM_MODEL,
-                        help=f"Ollama model to use (default: {LLM_MODEL}). Must be vision-capable.")
+                        help=f"Model to use (default: {LLM_MODEL}). Must be vision-capable. "
+                             "An Ollama model, or a Claude model id (e.g. claude-sonnet-5-5) "
+                             "with ANTHROPIC_API_KEY set.")
     parser.add_argument("--output-dir", default=str(Path(__file__).parent / "output"),
                         help="Where to write <pdf-stem>.json (default: ./output).")
     parser.add_argument("--schema-mode", default="prompt", choices=list(SCHEMA_MODES),

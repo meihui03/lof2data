@@ -587,12 +587,13 @@ with st.container(border=True):
             "Model",
             options=usable,
             index=usable.index(models.pick_default(usable)) if usable else None,
-            format_func=lambda name: f"{name}  ·  {'cloud' if models.is_cloud(name) else 'local'}",
+            format_func=lambda name: f"{name}  ·  {models.label_for(name)}",
             disabled=not usable,
             placeholder="No model available",
             help="Cloud is more accurate and faster; local runs entirely on this "
                  "machine with no quota. A cloud model that has hit its usage "
-                 "limit is not offered.",
+                 "limit is not offered. Claude API sends the pages to Anthropic "
+                 "and is billed per page from your API credit.",
         )
     with recheck_col:
         if st.button("Re-check", use_container_width=True, key="recheck",

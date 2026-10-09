@@ -12,6 +12,7 @@ working model or lets them waste a full extraction on a dead one.
 """
 
 import unittest
+from unittest import mock
 
 import models
 
@@ -72,11 +73,13 @@ class TestClassifyProbe(unittest.TestCase):
 
 
 class TestSupportedModels(unittest.TestCase):
-    def test_offers_exactly_the_two_benchmarked_models(self):
+    def test_offers_the_two_benchmarked_models_and_claude(self):
         self.assertEqual([m["name"] for m in models.SUPPORTED_MODELS],
-                         ["minimax-m3:cloud", "qwen3-vl:8b-instruct"])
+                         ["minimax-m3:cloud", "qwen3-vl:8b-instruct", "claude-sonnet-5-5"])
 
     def test_cloud_flag_matches_the_name(self):
+        # is_cloud means Ollama cloud - the ":cloud" suffix. A Claude model is
+        # hosted too, but has no Ollama quota and is never probed as one.
         for m in models.SUPPORTED_MODELS:
             self.assertEqual(m["is_cloud"], models.is_cloud(m["name"]))
 
@@ -85,7 +88,9 @@ class TestSupportedModels(unittest.TestCase):
 
 
 class TestPartition(unittest.TestCase):
-    SUPPORTED = models.SUPPORTED_MODELS
+    # The Ollama pair: these rules are about a cloud quota beside a local
+    # model. Claude's own blocking is covered in TestClaude.
+    SUPPORTED = [m for m in models.SUPPORTED_MODELS if not models.is_claude(m["name"])]
 
     def test_local_model_is_usable_without_a_probe(self):
         usable, blocked = models.partition(self.SUPPORTED, {})
@@ -192,6 +197,67 @@ class TestLooksRateLimited(unittest.TestCase):
     def test_handles_empty_stderr(self):
         self.assertFalse(models.looks_rate_limited(""))
         self.assertFalse(models.looks_rate_limited(None))
+
+
+    def test_detects_claude_out_of_credit(self):
+        # Out of prepaid credit is the Claude equivalent of a spent quota:
+        # every further run fails the same way until someone tops up.
+        stderr = ("RuntimeError: Claude API error 400: Your credit balance is too "
+                  "low to access the Anthropic API.")
+        self.assertTrue(models.looks_rate_limited(stderr))
+
+
+class TestClaude(unittest.TestCase):
+    def test_claude_ids_are_claude(self):
+        self.assertTrue(models.is_claude("claude-sonnet-5-5"))
+        self.assertFalse(models.is_claude("minimax-m3:cloud"))
+        self.assertFalse(models.is_claude("qwen3-vl:8b-instruct"))
+
+    def test_label_names_where_each_model_runs(self):
+        self.assertEqual(models.label_for("minimax-m3:cloud"), "cloud")
+        self.assertEqual(models.label_for("qwen3-vl:8b-instruct"), "local")
+        self.assertEqual(models.label_for("claude-sonnet-5-5"), "claude api")
+
+    def test_no_key_means_not_offered(self):
+        self.assertEqual(models.classify_claude_probe(None, None), models.NO_API_KEY)
+        self.assertEqual(models.classify_claude_probe("", None), models.NO_API_KEY)
+
+    def test_key_that_reaches_the_model_is_available(self):
+        self.assertEqual(models.classify_claude_probe("sk-ant-x", 200), models.AVAILABLE)
+
+    def test_rejected_key_is_its_own_reason(self):
+        self.assertEqual(models.classify_claude_probe("sk-ant-x", 401), models.BAD_API_KEY)
+
+    def test_anything_else_is_unreachable(self):
+        for status in (403, 404, 500, None):
+            self.assertEqual(models.classify_claude_probe("sk-ant-x", status),
+                             models.UNREACHABLE, status)
+
+    def test_no_key_reason_says_what_to_set(self):
+        _, blocked = models.partition(
+            [{"name": "claude-sonnet-5-5", "is_cloud": False}],
+            {"claude-sonnet-5-5": models.NO_API_KEY})
+        self.assertIn("ANTHROPIC_API_KEY", blocked[0][1])
+
+    def test_claude_is_not_looked_for_among_ollama_models(self):
+        # Ollama has never heard of a Claude model; "not installed - run
+        # ollama pull" would send the user the wrong way.
+        with mock.patch.object(models, "installed_model_names",
+                               return_value={"minimax-m3:cloud", "qwen3-vl:8b-instruct"}), \
+             mock.patch.object(models, "probe", return_value=models.AVAILABLE), \
+             mock.patch.object(models, "probe_claude", return_value=models.AVAILABLE) as claude:
+            usable, blocked = models.available_models()
+        self.assertIn("claude-sonnet-5-5", usable)
+        claude.assert_called_once_with("claude-sonnet-5-5")
+
+    def test_claude_without_a_key_is_blocked_but_the_rest_still_offered(self):
+        with mock.patch.object(models, "installed_model_names",
+                               return_value={"minimax-m3:cloud", "qwen3-vl:8b-instruct"}), \
+             mock.patch.object(models, "probe", return_value=models.AVAILABLE), \
+             mock.patch.object(models, "probe_claude", return_value=models.NO_API_KEY):
+            usable, blocked = models.available_models()
+        self.assertEqual(usable, ["minimax-m3:cloud", "qwen3-vl:8b-instruct"])
+        self.assertEqual([name for name, _ in blocked], ["claude-sonnet-5-5"])
 
 
 if __name__ == "__main__":

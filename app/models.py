@@ -17,6 +17,12 @@ call_llm() distinguishes two kinds of HTTP 429 from Ollama cloud:
 Only the second one disables a model here. Treating every 429 as fatal would
 lock the user out of a model that works fine.
 
+A Claude model (claude-...) is called through Anthropic's API, not Ollama, so
+it is checked differently: offered only when ANTHROPIC_API_KEY is set, and
+probed with a free model lookup that spends no tokens. Running out of prepaid
+credit cannot be seen that way - it surfaces on the first real call, and takes
+the model out of the selector the same way a spent Ollama quota does.
+
 Local models are never probed. There's no quota to hit, and if the daemon
 answered discovery it can serve them; a probe would only add page-load
 latency (a cold local model has to load into memory first, which is far
@@ -34,6 +40,8 @@ RATE_LIMITED = "rate_limited"
 PAYMENT_REQUIRED = "payment_required"
 NOT_INSTALLED = "not_installed"
 UNREACHABLE = "unreachable"
+NO_API_KEY = "no_api_key"
+BAD_API_KEY = "bad_api_key"
 
 # The two models this app offers, deliberately a fixed list rather than
 # everything Ollama has installed: these are the two the A/B benchmark in
@@ -44,6 +52,10 @@ UNREACHABLE = "unreachable"
 SUPPORTED_MODELS = [
     {"name": "minimax-m3:cloud", "is_cloud": True, "label": "cloud"},
     {"name": "qwen3-vl:8b-instruct", "is_cloud": False, "label": "local"},
+    # Not part of the Ollama A/B benchmark: added to try Claude on the LOF
+    # forms. is_cloud stays False - that flag means Ollama cloud, with its
+    # quota probe; Claude has its own check (probe_claude).
+    {"name": "claude-sonnet-5-5", "is_cloud": False, "label": "claude api"},
 ]
 
 # The model hybrid/extractor.py defaults to, and what this app used before it
@@ -56,6 +68,9 @@ _QUOTA_MARKER = "session usage limit"
 # Ollama cloud's 402 body: "this model requires a subscription or extra
 # usage, upgrade for access at https://ollama.com/upgrade".
 _PAYMENT_MARKER = "requires a subscription"
+# The Claude API's out-of-prepaid-credit error: "Your credit balance is too
+# low to access the Anthropic API."
+_CREDIT_MARKER = "credit balance is too low"
 
 BLOCK_REASONS = {
     RATE_LIMITED: "cloud usage limit reached - try again after the quota window resets",
@@ -63,6 +78,8 @@ BLOCK_REASONS = {
                        "or extra usage: https://ollama.com/settings"),
     NOT_INSTALLED: "not installed - run `ollama pull` for it first",
     UNREACHABLE: "unreachable - the daemon did not answer for this model",
+    NO_API_KEY: "set ANTHROPIC_API_KEY in .env to use the Claude API",
+    BAD_API_KEY: "ANTHROPIC_API_KEY was rejected - check the key in .env",
 }
 _SESSION_REASON = ("became unavailable during a run in this session (usage limit or "
                    "subscription required) - use Re-check once that's resolved")
@@ -73,6 +90,32 @@ def is_cloud(name):
     means hosted - a local model with 'cloud' elsewhere in its name is still
     local and must not be probed as though it had a quota."""
     return str(name).endswith(":cloud")
+
+
+def is_claude(name):
+    """Claude models are named by their API id, e.g. claude-sonnet-5-5."""
+    return str(name).startswith("claude-")
+
+
+def label_for(name):
+    """Where a model runs, for the selector: local, Ollama cloud, or the
+    Claude API."""
+    if is_claude(name):
+        return "claude api"
+    return "cloud" if is_cloud(name) else "local"
+
+
+def classify_claude_probe(api_key, status_code):
+    """Turns a Claude model lookup into AVAILABLE / NO_API_KEY / BAD_API_KEY
+    / UNREACHABLE. status_code is None when the lookup never got an HTTP
+    answer. Pure, so the rules can be tested without a key."""
+    if not api_key:
+        return NO_API_KEY
+    if status_code == 200:
+        return AVAILABLE
+    if status_code == 401:
+        return BAD_API_KEY
+    return UNREACHABLE
 
 
 def classify_probe(status_code, body_text):
@@ -105,7 +148,7 @@ def looks_rate_limited(stderr):
     a 402 through, so the user could pick the same dead model again and lose
     another full OCR pass to it."""
     text = (stderr or "").lower()
-    return _QUOTA_MARKER in text or _PAYMENT_MARKER in text
+    return _QUOTA_MARKER in text or _PAYMENT_MARKER in text or _CREDIT_MARKER in text
 
 
 def partition(supported, probe_results, session_rate_limited=frozenset()):
@@ -169,8 +212,27 @@ def probe(name, host=OLLAMA_HOST, timeout=20):
     return classify_probe(response.status_code, response.text)
 
 
+def probe_claude(name, timeout=20):
+    """Checks the key and that this account can use the model, by looking
+    the model up - free, no tokens. The SDK is imported here so the app
+    still starts for someone who never installed it."""
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        return classify_claude_probe(api_key, None)
+    try:
+        import anthropic
+        anthropic.Anthropic(api_key=api_key, timeout=timeout, max_retries=1).models.retrieve(name)
+        status = 200
+    except ImportError:
+        status = None
+    except Exception as e:  # anthropic.APIStatusError carries the HTTP status
+        status = getattr(e, "status_code", None)
+    return classify_claude_probe(api_key, status)
+
+
 def available_models(host=OLLAMA_HOST, session_rate_limited=frozenset()):
-    """Checks the two supported models and probes the cloud one.
+    """Checks the supported models: probes the Ollama cloud one, and looks up
+    the Claude one with the API key.
 
     Returns (usable_names, [(name, reason)]). Propagates
     requests.RequestException from the installed-models lookup, which means
@@ -180,7 +242,9 @@ def available_models(host=OLLAMA_HOST, session_rate_limited=frozenset()):
     results = {}
     for model in SUPPORTED_MODELS:
         name = model["name"]
-        if name not in installed:
+        if is_claude(name):
+            results[name] = probe_claude(name)
+        elif name not in installed:
             results[name] = NOT_INSTALLED
         elif model["is_cloud"]:
             results[name] = probe(name, host)

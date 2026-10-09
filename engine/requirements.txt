@@ -7,3 +7,4 @@ paddlepaddle==3.3.1
 paddlex[ocr]==3.7.2
 pandas
 requests
+anthropic

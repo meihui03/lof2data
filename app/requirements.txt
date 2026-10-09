@@ -5,3 +5,4 @@ PyMuPDF
 python-dotenv
 requests
 python-dateutil
+anthropic
