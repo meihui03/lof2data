@@ -150,6 +150,65 @@ def detect_struck_native(page, candidate_boxes):
     return struck
 
 
+# ------------------------------------------------ born-digital circle detect
+
+# Annotation types a person uses to ring or box an option. An annotation is
+# always added on top of the generated form, never part of the template, so
+# even a rectangle one is a deliberate mark - unlike a printed box.
+RING_ANNOT_TYPES = {"Circle", "Square", "Ink", "Polygon", "PolyLine"}
+RING_MIN_COVER = 0.6          # of the option's box that the ring must cover
+
+
+def _area(rect):
+    """Area of a rect, 0 for an empty one (a non-overlapping intersection)."""
+    return max(rect.width, 0) * max(rect.height, 0)
+
+
+def _is_drawn_ring(drawing):
+    """Is this vector path shaped like a hand ring rather than template
+    furniture? A curve (an oval, a Circle annotation's appearance), or a
+    freehand polyline - many segments, some diagonal. A printed box is four
+    axis-aligned lines or a 're', and stays out."""
+    items = drawing.get("items") or []
+    if any(item[0] == "c" for item in items):
+        return True
+    lines = [item for item in items if item[0] == "l"]
+    diagonal = [l for l in lines if abs(l[1].x - l[2].x) > 0.5 and abs(l[1].y - l[2].y) > 0.5]
+    return len(lines) >= 5 and len(diagonal) >= 2
+
+
+def _ring_rects(page):
+    """Every ring-shaped mark on the page. get_drawings() already includes
+    annotation appearances on current PyMuPDF; annots() is read too, so an
+    annotation without a rendered appearance is not missed. A ring counted
+    twice is harmless - it still encloses the same single option."""
+    rects = [d["rect"] for d in page.get_drawings() if d.get("rect") and _is_drawn_ring(d)]
+    rects += [annot.rect for annot in page.annots() if annot.type[1] in RING_ANNOT_TYPES]
+    return rects
+
+
+def detect_circled_native(page, candidate_boxes):
+    """Marks a candidate circled when a ring covers most of its box and the
+    centre of no other candidate. The second rule is what rejects a ring (or
+    an oval border) drawn around the whole option line."""
+    rings = _ring_rects(page)
+    centres = {c: fitz.Point((b.x0 + b.x1) / 2, (b.y0 + b.y1) / 2)
+               for c, b in candidate_boxes.items()}
+    circled = {}
+    for candidate, box in candidate_boxes.items():
+        hit = False
+        for ring in rings:
+            cover = _area(ring & box) / max(_area(box), 1e-6)
+            if cover < RING_MIN_COVER or not ring.contains(centres[candidate]):
+                continue
+            if any(ring.contains(p) for other, p in centres.items() if other != candidate):
+                continue
+            hit = True
+            break
+        circled[candidate] = hit
+    return circled
+
+
 # ------------------------------------------------------- raster (scan) path
 
 def crop_line(img, box, pad_frac=0.9, target_line_h=110):

@@ -1265,15 +1265,25 @@ def resolve_choice_fields_geometrically(pdf_path, ocr_df=None, exclude=()):
 
 
 def _resolve_choice_native(pdf_path, candidates):
-    """Born-digital path: the strike is a real vector drawing, so this is an
-    exact read rather than a pixel heuristic - and needs no OCR at all."""
+    """Born-digital path: marks are real vector drawings or annotations, so
+    this is an exact read rather than a pixel heuristic - and needs no OCR.
+
+    Strikes and circles are read separately. The generating system strikes
+    options out; a person marking the PDF up afterwards may circle one
+    instead. When both give an answer and the answers differ, nothing is
+    returned - choosing would be a guess, and the LLM's answer stands."""
     with fitz.open(pdf_path) as pdf:
         for page in pdf:
             boxes = mark_detector.locate_native(page, candidates)
             if not boxes:
                 continue
-            answer, _ = mark_detector.resolve(
+            by_strike, _ = mark_detector.resolve(
                 struck=mark_detector.detect_struck_native(page, boxes))
+            by_circle, _ = mark_detector.resolve(
+                circled=mark_detector.detect_circled_native(page, boxes))
+            if by_strike and by_circle and by_strike != by_circle:
+                return None
+            answer = by_circle or by_strike
             if answer:
                 return answer
     return None
