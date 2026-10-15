@@ -262,7 +262,8 @@ def find_box_by_text(ocr_boxes, value):
     # "NO. 50, JALAN ..." matched "Business Reg No. ..." on the prefix "NO. "
     # and boxed the letterhead.
     if " " in needle:
-        return _best_word_overlap(ocr_boxes, needle)
+        best = _best_word_overlap(ocr_boxes, needle)
+        return _with_wrapped_lines(ocr_boxes, best, needle) if best else None
 
     # One word whose tail OCR clipped ("FULLY" recognized as "FULL"). Only a
     # single word can be mangled that way.
@@ -298,6 +299,47 @@ def _best_word_overlap(ocr_boxes, value):
     return best if best_count >= _MIN_OVERLAP_WORDS else None
 
 
+def _words(text):
+    return {w for w in re.split(r"[^a-z0-9]+", str(text).lower())
+            if len(w) >= _MIN_OVERLAP_WORD_LEN}
+
+
+def _with_wrapped_lines(ocr_boxes, start, value):
+    """`start` grown to cover the rest of a value the form wrapped onto the
+    lines directly above or below it.
+
+    An address printed over two lines ("8, JALAN CONTOH 3, TAMAN
+    CONTOH, 43000" / "BANDAR KAJANG, SELANGOR") is two text lines, and
+    the best single line covered only the first. A neighbouring line joins
+    only when EVERY word on it belongs to the value, so the "Date : 2026-03-31"
+    line printed right underneath stays out. Returns `start` unchanged when
+    nothing wraps."""
+    coords = ("x0", "y0", "x1", "y1")
+    if not all(k in start for k in coords):
+        return start
+    wanted = _words(value)
+    covered = dict(start)
+    height = start["y1"] - start["y0"]
+    grew = True
+    while grew:
+        grew = False
+        for b in ocr_boxes:
+            if (b is start or b.get("page") != start.get("page")
+                    or not all(k in b for k in coords)):
+                continue
+            if b["y0"] >= covered["y0"] and b["y1"] <= covered["y1"]:
+                continue                                  # already inside
+            touching = (b["y0"] - covered["y1"] <= height * 0.5
+                        and covered["y0"] - b["y1"] <= height * 0.5)
+            words = _words(b.get("text", ""))
+            if touching and words and words <= wanted:
+                covered.update(x0=min(covered["x0"], b["x0"]), y0=min(covered["y0"], b["y0"]),
+                               x1=max(covered["x1"], b["x1"]), y1=max(covered["y1"], b["y1"]),
+                               text=f'{covered.get("text", "")} {b.get("text", "")}')
+                grew = True
+    return covered
+
+
 def find_choice_line(ocr_boxes, candidates):
     """The OCR box holding a choice field's printed option list, found the
     same way mark_detector.locate_ocr_line finds it: the line where the most
@@ -321,3 +363,62 @@ def find_choice_line(ocr_boxes, candidates):
         if count > best_count:
             best, best_count = box, count
     return best if best_count >= _MIN_DISTINCT_CANDIDATES else None
+
+
+# A label of one word ("Date", "Name", "Address") is printed all over a form;
+# only a phrase is specific enough to point at one line.
+_MIN_LABEL_WORDS = 2
+
+# How far outside the label line's own height another line's centre may sit
+# and still count as the same printed row - a little, for baselines that
+# don't quite line up; never enough to reach the row below.
+_ROW_TOLERANCE = 0.25
+
+
+def _label_phrases(field_name):
+    """The printable phrases of a field name: a parenthetical dropped ("Notice
+    to Quit (months)" -> "Notice to Quit"), alternatives split on "/", and
+    only phrases long enough to identify one line."""
+    name = re.sub(r"\([^)]*\)", " ", str(field_name))
+    phrases = []
+    for part in name.split("/"):
+        words = [w for w in re.split(r"\s+", part.strip()) if len(w) >= 2]
+        if len(words) >= _MIN_LABEL_WORDS:
+            phrases.append(" ".join(words))
+    return phrases
+
+
+def find_row_by_label(ocr_boxes, field_name):
+    """The printed row a field sits on, found by its LABEL - the last way to
+    place a value when the value itself can't be found as written.
+
+    The model often returns a value no single line holds: "(1) ONE Year(s)",
+    joined from a text layer that has "( 1", ") ONE" and "Year (s)" as three
+    lines beside the label. Or the value is a bare "2", which find_box_by_text
+    rightly refuses - the digit is everywhere. The label ("3) Period Of
+    Tenancy", "10) Notice To Quit shall be 2") is printed once, so the row it
+    starts is where the value was read.
+
+    Returns one box covering the label line and every line on the same row
+    (same page, centre within the label's height), or None when the label is
+    one word, isn't on the page, or appears more than once - no box beats a
+    confidently wrong one."""
+    phrases = _label_phrases(field_name)
+    if not phrases:
+        return None
+    hits = [b for b in ocr_boxes
+            if any(_contains_word(b.get("text", ""), p) for p in phrases)]
+    if len(hits) != 1:
+        return None
+
+    label = hits[0]
+    pad = (label["y1"] - label["y0"]) * _ROW_TOLERANCE
+    row = [b for b in ocr_boxes
+           if b.get("page") == label.get("page")
+           and label["y0"] - pad <= (b["y0"] + b["y1"]) / 2 <= label["y1"] + pad]
+    return {
+        "index": label.get("index"), "page": label.get("page"),
+        "text": " ".join(b.get("text", "") for b in sorted(row, key=lambda b: b["x0"])),
+        "x0": min(b["x0"] for b in row), "y0": min(b["y0"] for b in row),
+        "x1": max(b["x1"] for b in row), "y1": max(b["y1"] for b in row),
+    }

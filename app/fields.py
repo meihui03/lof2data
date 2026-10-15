@@ -22,7 +22,7 @@ FIELD_SECTIONS = [
     ("Financial", [
         "Monthly Rental", "Security Deposit", "Utilities Deposit",
         "Advance Rental", "Other Deposit (if any)", "Total Payable",
-        "Earnest Deposit Amount", "Legal Cost / Stamp Duty Allocation",
+        "Earnest Deposit Amount", "Legal Cost / Stamp Duty Amount",
     ]),
     ("Parties", [
         "Landlord Name(s)", "Landlord NRIC/Passport No.", "Landlord Address",

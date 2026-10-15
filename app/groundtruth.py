@@ -36,13 +36,29 @@ def fetch_sale(sale_id, password, base_url=DEFAULT_BASE_URL):
     return payload["data"]["sale"]
 
 
+def _obj(record, key):
+    """record[key] as a dict, or {} when it is missing OR null.
+
+    The CRM sends an absent object as null rather than leaving the key out - a
+    sale with no negotiator assigned yet, say. `.get(key, {})` only defaults a
+    MISSING key, so the null went into the next .get() and failed the whole
+    run with "'NoneType' object has no attribute 'get'"."""
+    value = record.get(key) if isinstance(record, dict) else None
+    return value if isinstance(value, dict) else {}
+
+
+def _dicts(items):
+    """The dict entries of a list that may be null or hold nulls."""
+    return [item for item in (items or []) if isinstance(item, dict)]
+
+
 def _tenant_client(sale):
-    tenants = sale.get("amla_purpose", {}).get("purchasers_or_tenants") or []
+    tenants = _dicts(_obj(sale, "amla_purpose").get("purchasers_or_tenants"))
     return tenants[0] if tenants else {}
 
 
 def _landlord_parties(sale):
-    return sale.get("amla_purpose", {}).get("vendors_or_landlords") or []
+    return _dicts(_obj(sale, "amla_purpose").get("vendors_or_landlords"))
 
 
 def _join_parties(parties, key):
@@ -61,7 +77,7 @@ def _join_parties(parties, key):
 
 
 def _earliest_deposit(sale):
-    deposits = sale.get("deposits") or []
+    deposits = _dicts(sale.get("deposits"))
     if not deposits:
         return {}
     return min(deposits, key=lambda d: d.get("deposit_date") or "9999-99-99")
@@ -105,10 +121,10 @@ CANONICAL_FIELDS = [
 
 CANONICAL_API_MAP = {
     "Reference No.": lambda s: s.get("lof_no"),
-    "Attn: Negotiator(s) / Witness": lambda s: s.get("listing_negotiator", {}).get("name"),
+    "Attn: Negotiator(s) / Witness": lambda s: _obj(s, "listing_negotiator").get("name"),
     "Date of LOF": lambda s: s.get("date_of_lof"),
-    "Description of Property (Selected)": lambda s: (s.get("property", {}).get("type") or "").title() or None,
-    "Property known as": lambda s: s.get("property", {}).get("address"),
+    "Description of Property (Selected)": lambda s: (_obj(s, "property").get("type") or "").title() or None,
+    "Property known as": lambda s: _obj(s, "property").get("address"),
     "Furnish Status": lambda s: None,
     "Earnest Deposit Amount": lambda s: _earliest_deposit(s).get("amount"),
     "Security Deposit": lambda s: None,

@@ -182,9 +182,9 @@ class TestCitationIsPlausible(unittest.TestCase):
 
     def test_value_spanning_two_lines_backs_each(self):
         # An address the PDF wraps; each cited line is a slice of the value.
-        value = "5, LORONG MARKISAH 23, TAMAN MARKISAH, 14000 BUKIT MERTAJAM, PULAU PINANG"
-        self.assertTrue(boxes.citation_is_plausible(": 5, LORONG MARKISAH 23, TAMAN MARKISAH, 14000", value))
-        self.assertTrue(boxes.citation_is_plausible("BUKIT MERTAJAM, PULAU PINANG", value))
+        value = "8, JALAN CONTOH 3, TAMAN CONTOH, 43000 BANDAR KAJANG, SELANGOR"
+        self.assertTrue(boxes.citation_is_plausible(": 8, JALAN CONTOH 3, TAMAN CONTOH, 43000", value))
+        self.assertTrue(boxes.citation_is_plausible("BANDAR KAJANG, SELANGOR", value))
 
     def test_unrelated_line_does_not_back_it(self):
         # The actual bug: a tenant name cited against the property-type line.
@@ -202,8 +202,8 @@ class TestCitedBoxesValidation(unittest.TestCase):
     OCR = [
         {"index": 0, "page": 0, "text": "Description of Property: House / Condo"},
         {"index": 1, "page": 0, "text": ": LEM SIEW YUEN"},
-        {"index": 2, "page": 0, "text": ": 5, LORONG MARKISAH 23, TAMAN MARKISAH, 14000"},
-        {"index": 3, "page": 0, "text": "BUKIT MERTAJAM, PULAU PINANG"},
+        {"index": 2, "page": 0, "text": ": 8, JALAN CONTOH 3, TAMAN CONTOH, 43000"},
+        {"index": 3, "page": 0, "text": "BANDAR KAJANG, SELANGOR"},
     ]
     BY_INDEX = {b["index"]: b for b in OCR}
 
@@ -216,7 +216,7 @@ class TestCitedBoxesValidation(unittest.TestCase):
         self.assertEqual([b["index"] for b in result], [1])
 
     def test_multi_line_citation_keeps_every_backing_line(self):
-        value = "5, LORONG MARKISAH 23, TAMAN MARKISAH, 14000 BUKIT MERTAJAM, PULAU PINANG"
+        value = "8, JALAN CONTOH 3, TAMAN CONTOH, 43000 BANDAR KAJANG, SELANGOR"
         result = boxes.cited_boxes(self.BY_INDEX, [2, 3], value=value)
         self.assertEqual([b["index"] for b in result], [2, 3])
 
@@ -452,6 +452,100 @@ class TestReadableGroupPath(unittest.TestCase):
         self.assertEqual(boxes.readable_group_path("tenant", "NRIC/Passport No."),
                          "Tenant NRIC/Passport No.")
 
+
+
+def _line(index, text, x0, y0, x1, y1, page=0):
+    return {"index": index, "page": page, "text": text, "x0": x0, "y0": y0, "x1": x1, "y1": y1}
+
+
+# The tenancy terms block of a born-digital LOF (72941), as its text layer has
+# it: the printed label is one line, and the value is split over the lines
+# beside it - "( 1", ") ONE", "Year (s)".
+TERMS = [
+    _line(11, "3) Period Of Tenancy", 0.065, 0.220, 0.30, 0.230),
+    _line(12, ": (    1", 0.373, 0.217, 0.42, 0.229),
+    _line(13, ")     ONE", 0.518, 0.217, 0.60, 0.229),
+    _line(14, "Year (s)", 0.658, 0.220, 0.71, 0.230),
+    _line(15, "4) Option To Renew", 0.065, 0.233, 0.28, 0.243),
+    _line(16, ": (    1", 0.373, 0.231, 0.42, 0.243),
+    _line(17, ")     ONE", 0.518, 0.231, 0.60, 0.243),
+    _line(18, "Year (s)", 0.658, 0.234, 0.71, 0.244),
+    _line(35, "10) Notice To Quit shall be     2", 0.065, 0.334, 0.55, 0.344),
+    _line(40, "Date", 0.065, 0.80, 0.10, 0.81),
+    _line(41, "Date", 0.55, 0.80, 0.60, 0.81),
+]
+
+
+class TestFindRowByLabel(unittest.TestCase):
+    """The last way to place a value: its field's printed label. Used when the
+    value can't be found as written - the model joined "( 1", ") ONE" and
+    "Year (s)" into "(1) ONE Year(s)", which no single line holds, or the
+    value is a bare "2" that a text search rightly refuses."""
+
+    def test_the_whole_row_beside_the_label(self):
+        box = boxes.find_row_by_label(TERMS, "Period of Tenancy")
+        self.assertEqual((box["x0"], box["y0"], box["x1"], box["y1"]), (0.065, 0.217, 0.71, 0.230))
+        self.assertEqual(box["index"], 11)
+
+    def test_the_next_row_is_not_swallowed(self):
+        box = boxes.find_row_by_label(TERMS, "Option to Renew")
+        self.assertEqual((box["y0"], box["y1"]), (0.231, 0.244))
+
+    def test_a_parenthetical_in_the_field_name_is_ignored(self):
+        box = boxes.find_row_by_label(TERMS, "Notice to Quit (months)")
+        self.assertEqual(box["index"], 35)
+
+    def test_case_does_not_matter(self):
+        self.assertIsNotNone(boxes.find_row_by_label(TERMS, "PERIOD OF TENANCY"))
+
+    def test_a_one_word_label_is_too_common_to_trust(self):
+        self.assertIsNone(boxes.find_row_by_label(TERMS, "Date"))
+
+    def test_a_label_printed_twice_is_ambiguous(self):
+        twice = TERMS + [_line(90, "Period Of Tenancy (renewal)", 0.065, 0.9, 0.3, 0.91)]
+        self.assertIsNone(boxes.find_row_by_label(twice, "Period of Tenancy"))
+
+    def test_not_on_the_page(self):
+        self.assertIsNone(boxes.find_row_by_label(TERMS, "Title Details"))
+
+    def test_rows_on_another_page_are_not_joined(self):
+        other_page = TERMS + [_line(99, "Year (s)", 0.7, 0.220, 0.8, 0.230, page=1)]
+        self.assertEqual(boxes.find_row_by_label(other_page, "Period of Tenancy")["x1"], 0.71)
+
+
+# A party's address as the text layer has it: wrapped onto a second line, with
+# the "Date" line of the same block right underneath.
+ADDRESS_BLOCK = [
+    _line(60, "Address", 0.073, 0.624, 0.117, 0.636),
+    _line(61, ": 8, JALAN CONTOH 3, TAMAN CONTOH, 43000", 0.141, 0.624, 0.453, 0.636),
+    _line(62, "BANDAR KAJANG, SELANGOR", 0.152, 0.634, 0.352, 0.645),
+    _line(63, "Date", 0.073, 0.650, 0.100, 0.660),
+    _line(64, ": 2026-03-31", 0.141, 0.650, 0.220, 0.660),
+]
+WRAPPED = "8, JALAN CONTOH 3, TAMAN CONTOH, 43000 BANDAR KAJANG, SELANGOR"
+
+
+class TestWrappedValues(unittest.TestCase):
+    """A value the form wraps over two lines used to be highlighted on the
+    first line only - the search picked the single best line."""
+
+    def test_the_highlight_covers_both_lines(self):
+        box = boxes.find_box_by_text(ADDRESS_BLOCK, WRAPPED)
+        self.assertEqual((box["x0"], box["y0"], box["x1"], box["y1"]), (0.141, 0.624, 0.453, 0.645))
+
+    def test_the_line_below_is_not_swallowed(self):
+        # "Date : 2026-03-31" sits right under the address and shares none of it.
+        box = boxes.find_box_by_text(ADDRESS_BLOCK, WRAPPED)
+        self.assertLess(box["y1"], 0.650)
+
+    def test_a_value_on_one_line_is_unchanged(self):
+        box = boxes.find_box_by_text(ADDRESS_BLOCK, "BANDAR KAJANG, SELANGOR")
+        self.assertEqual(box["index"], 62)
+        self.assertEqual((box["y0"], box["y1"]), (0.634, 0.645))
+
+    def test_the_first_part_alone_still_finds_its_line(self):
+        box = boxes.find_box_by_text(ADDRESS_BLOCK, "8, JALAN CONTOH 3")
+        self.assertEqual(box["index"], 61)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

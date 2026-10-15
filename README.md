@@ -142,7 +142,13 @@ cd engine
 
 ## Models
 
-Two are offered, both benchmarked on real LOF forms:
+Offered in the app: `qwen3-vl:8b-instruct` (local, selected by default so a run
+never spends API credit unasked) and `claude-sonnet-5-5` (below).
+`minimax-m3:cloud` is switched off in `app/models.py` — past its free allowance
+it needs a paid Ollama subscription, and the Claude API covers the hosted
+option. Uncomment its line to offer it again.
+
+Both Ollama models were benchmarked on real LOF forms:
 
 | Model | | Accuracy | Time/doc |
 |---|---|---|---|
@@ -200,11 +206,13 @@ app/.venv/bin/python3 app/test_models.py
 app/.venv/bin/python3 app/test_groundtruth.py
 app/.venv/bin/python3 app/test_fields.py
 app/.venv/bin/python3 app/test_table.py
+app/.venv/bin/python3 app/test_docview.py
 app/.venv/bin/python3 app/test_app_ui.py
 engine/.venv/bin/python3 engine/test_extractor_flatten.py
 engine/.venv/bin/python3 engine/test_schema_models.py
 engine/.venv/bin/python3 engine/test_field_selection.py
 engine/.venv/bin/python3 engine/test_claude.py
+engine/.venv/bin/python3 engine/test_mark_detector_native.py
 ```
 
 ## Notes

@@ -73,9 +73,11 @@ class TestClassifyProbe(unittest.TestCase):
 
 
 class TestSupportedModels(unittest.TestCase):
-    def test_offers_the_two_benchmarked_models_and_claude(self):
+    def test_offers_the_local_model_and_claude(self):
+        # minimax-m3:cloud is switched off: an Ollama cloud subscription isn't
+        # wanted when the Claude API covers the hosted option.
         self.assertEqual([m["name"] for m in models.SUPPORTED_MODELS],
-                         ["minimax-m3:cloud", "qwen3-vl:8b-instruct", "claude-sonnet-5-5"])
+                         ["qwen3-vl:8b-instruct", "claude-sonnet-5-5"])
 
     def test_cloud_flag_matches_the_name(self):
         # is_cloud means Ollama cloud - the ":cloud" suffix. A Claude model is
@@ -83,14 +85,17 @@ class TestSupportedModels(unittest.TestCase):
         for m in models.SUPPORTED_MODELS:
             self.assertEqual(m["is_cloud"], models.is_cloud(m["name"]))
 
-    def test_cloud_listed_first(self):
-        self.assertTrue(models.SUPPORTED_MODELS[0]["is_cloud"])
+    def test_no_ollama_cloud_model_is_offered(self):
+        self.assertFalse(any(m["is_cloud"] for m in models.SUPPORTED_MODELS))
 
 
 class TestPartition(unittest.TestCase):
-    # The Ollama pair: these rules are about a cloud quota beside a local
-    # model. Claude's own blocking is covered in TestClaude.
-    SUPPORTED = [m for m in models.SUPPORTED_MODELS if not models.is_claude(m["name"])]
+    # An Ollama cloud model beside a local one. Spelled out rather than read
+    # from SUPPORTED_MODELS: these rules are about a cloud quota, and they
+    # must keep holding while no cloud model happens to be switched on.
+    # Claude's own blocking is covered in TestClaude.
+    SUPPORTED = [{"name": "minimax-m3:cloud", "is_cloud": True},
+                 {"name": "qwen3-vl:8b-instruct", "is_cloud": False}]
 
     def test_local_model_is_usable_without_a_probe(self):
         usable, blocked = models.partition(self.SUPPORTED, {})
@@ -160,10 +165,12 @@ class TestPartition(unittest.TestCase):
 
 
 class TestPickDefault(unittest.TestCase):
-    def test_prefers_the_current_production_model(self):
+    def test_prefers_the_free_local_model(self):
+        # Never the paid one by default: a run nobody chose a model for must
+        # not spend Claude API credit.
         self.assertEqual(
-            models.pick_default(["qwen3-vl:8b-instruct", "minimax-m3:cloud"]),
-            "minimax-m3:cloud")
+            models.pick_default(["claude-sonnet-5-5", "qwen3-vl:8b-instruct"]),
+            "qwen3-vl:8b-instruct")
 
     def test_falls_back_to_first_usable(self):
         self.assertEqual(
@@ -268,7 +275,7 @@ class TestClaude(unittest.TestCase):
              mock.patch.object(models, "probe", return_value=models.AVAILABLE), \
              mock.patch.object(models, "probe_claude", return_value=models.NO_API_KEY):
             usable, blocked = models.available_models()
-        self.assertEqual(usable, ["minimax-m3:cloud", "qwen3-vl:8b-instruct"])
+        self.assertEqual(usable, ["qwen3-vl:8b-instruct"])
         self.assertEqual([name for name, _ in blocked], ["claude-sonnet-5-5"])
 
 

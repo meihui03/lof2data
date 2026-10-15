@@ -1,7 +1,7 @@
 """Which of the supported models can this app actually offer right now?
 
-Two models are offered - minimax-m3:cloud and qwen3-vl:8b-instruct - and this
-module decides which of them are selectable at any moment. Kept out of app.py
+The offered models are listed in SUPPORTED_MODELS, and this module decides
+which of them are selectable at any moment. Kept out of app.py
 so the UI file stays about UI: everything that talks to the Ollama daemon, and
 every decision about whether a model is offerable, lives here.
 
@@ -50,7 +50,10 @@ BAD_API_KEY = "bad_api_key"
 # may be vision-capable but are unmeasured on this document type, so they
 # aren't offered. Add one here once it's been benchmarked.
 SUPPORTED_MODELS = [
-    {"name": "minimax-m3:cloud", "is_cloud": True, "label": "cloud"},
+    # Switched off: it needs a paid Ollama cloud subscription once the free
+    # allowance is spent, and the Claude API below covers the hosted option.
+    # Uncomment to offer it again - the quota handling here still applies.
+    # {"name": "minimax-m3:cloud", "is_cloud": True, "label": "cloud"},
     {"name": "qwen3-vl:8b-instruct", "is_cloud": False, "label": "local"},
     # Not part of the Ollama A/B benchmark: added to try Claude on the LOF
     # forms. is_cloud stays False - that flag means Ollama cloud, with its
@@ -58,9 +61,9 @@ SUPPORTED_MODELS = [
     {"name": "claude-sonnet-5-5", "is_cloud": False, "label": "claude api"},
 ]
 
-# The model hybrid/extractor.py defaults to, and what this app used before it
-# had a selector - so the default selection preserves existing behaviour.
-PREFERRED_DEFAULT = "minimax-m3:cloud"
+# Selected when the page opens: the free local model, so a run nobody chose a
+# model for never spends Claude API credit. Picking Claude is one click.
+PREFERRED_DEFAULT = "qwen3-vl:8b-instruct"
 
 # Substrings that mark the two non-retryable cloud refusals (see module
 # docstring). Both match text extractor.call_llm raises RuntimeError on.

@@ -134,5 +134,45 @@ class TestChoiceMatch(unittest.TestCase):
         self.assertTrue(G.choice_match("Condo", "condo"))
 
 
+
+class TestNullsInTheRecord(unittest.TestCase):
+    """The CRM sends a missing object as null rather than leaving the key out
+    - a sale with no negotiator assigned yet, no property, no AMLA section.
+    `.get(key, {})` only defaults a MISSING key, so a null went straight into
+    the next .get() and failed the whole run with "'NoneType' object has no
+    attribute 'get'". A null should read as no value, like a missing key."""
+
+    BASE = {"lof_no": "X", "date_of_lof": "2026-01-01", "total_deposit": "1",
+            "deposits": [], "listing_negotiator": {"name": "A"},
+            "property": {"type": "condo", "address": "x"},
+            "amla_purpose": {"purchasers_or_tenants": [{"name": "T", "nric": "1"}],
+                             "vendors_or_landlords": [{"name": "L", "nric": "2"}]}}
+
+    def build(self, **changes):
+        sale = dict(self.BASE, **changes)
+        return G.build_canonical_ground_truth(sale)
+
+    def test_null_negotiator(self):
+        self.assertIsNone(self.build(listing_negotiator=None)["Attn: Negotiator(s) / Witness"])
+
+    def test_null_property(self):
+        gt = self.build(property=None)
+        self.assertIsNone(gt["Property known as"])
+        self.assertIsNone(gt["Description of Property (Selected)"])
+
+    def test_null_amla_section(self):
+        gt = self.build(amla_purpose=None)
+        self.assertIsNone(gt["Tenant Name"])
+        self.assertIsNone(gt["Landlord Name"])
+
+    def test_null_party_lists_and_entries(self):
+        gt = self.build(amla_purpose={"purchasers_or_tenants": [None],
+                                      "vendors_or_landlords": [None, {"name": "L"}]})
+        self.assertIsNone(gt["Tenant Name"])
+        self.assertEqual(gt["Landlord Name"], "L")
+
+    def test_null_deposit_entry(self):
+        self.assertIsNone(self.build(deposits=[None])["Earnest Deposit Amount"])
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

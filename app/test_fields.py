@@ -17,7 +17,7 @@ ALL = [
     "Tenancy Expiration Date", "Period of Tenancy", "Option to Renew",
     "Monthly Rental", "Security Deposit", "Utilities Deposit",
     "Advance Rental", "Other Deposit (if any)", "Total Payable",
-    "Earnest Deposit Amount", "Legal Cost / Stamp Duty Allocation",
+    "Earnest Deposit Amount", "Legal Cost / Stamp Duty Amount",
     "Special/Other Condition(s)", "Notice to Quit (months)",
     "Description of Property/Property Type", "Property Address",
     "Title Details", "Premise Usage", "Furnished Status",

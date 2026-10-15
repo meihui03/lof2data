@@ -1,5 +1,24 @@
 [theme]
-primaryColor = "#4FA8E0"
-backgroundColor = "#F5F8FA"
-secondaryBackgroundColor = "#FFFFFF"
-textColor = "#1E4D6B"
+# Chiief: off-black ink on a light canvas. Primary is the ink, so primary
+# buttons, toggles and checkboxes are black; green (app.py's CSS) marks state
+# and focus.
+primaryColor = "#0f1012"
+backgroundColor = "#f2f2f4"
+secondaryBackgroundColor = "#fdfdfd"
+textColor = "#0f1012"
+linkColor = "#4A7736"
+redColor = "#B3261E"
+# One "<name>:<url>" entry only: a ", sans-serif" fallback after it was read
+# as part of the URL, the stylesheet never loaded, and the page fell back to
+# the browser's serif.
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@300..500&display=swap"
+baseFontWeight = 400
+baseRadius = "12px"
+buttonRadius = "full"
+borderColor = "#e1e1e4"
+showWidgetBorder = true
+
+[client]
+# No "Deploy" button: it publishes to Streamlit Community Cloud, which this app
+# isn't. The menu and the running indicator stay. "auto" brings it back.
+toolbarMode = "minimal"

@@ -23,7 +23,7 @@ import schema_models as S
 class TestSafeName(unittest.TestCase):
     def test_makes_a_valid_python_identifier(self):
         for display in ["Reference No.", "Other Deposit (if any)",
-                        "NRIC/Passport No.", "Legal Cost / Stamp Duty Allocation",
+                        "NRIC/Passport No.", "Legal Cost / Stamp Duty Amount",
                         "Description/Property Type", "Notice to Quit (months)"]:
             name = S.safe_name(display)
             self.assertTrue(name.isidentifier(), f"{display!r} -> {name!r} is not an identifier")
